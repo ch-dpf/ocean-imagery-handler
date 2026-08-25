@@ -1,0 +1,43 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+
+  api:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8100:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data/workspace
+    depends_on:
+      - redis
+
+  worker:
+    build: .
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=2
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data/workspace
+    depends_on:
+      - redis
+
+  imagery-server:
+    image: nginx:latest
+    ports:
+      - "8102:80"
+    volumes:
+      # Full data mount so tileset symlinks (../../jobs/...) resolve inside the container.
+      - ./data:/data
+      - ./scripts/preview:/usr/share/nginx/preview:ro
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+    restart: unless-stopped
+
+volumes:
+  redis_data:

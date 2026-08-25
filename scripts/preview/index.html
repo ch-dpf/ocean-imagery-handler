@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Ocean Imagery Preview</title>
+  <script src="https://cesium.com/downloads/cesiumjs/releases/1.120/Build/Cesium/Cesium.js"></script>
+  <link href="https://cesium.com/downloads/cesiumjs/releases/1.120/Build/Cesium/Widgets/widgets.css" rel="stylesheet" />
+  <style>
+    html, body, #cesiumContainer { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; }
+    #info {
+      position: absolute; top: 10px; left: 10px; z-index: 1000;
+      background: rgba(42, 42, 42, 0.85); color: #fff; padding: 8px 12px;
+      font-family: sans-serif; font-size: 13px; border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <div id="info">Add ?tileset={name} to the URL</div>
+  <div id="cesiumContainer"></div>
+  <script>
+    if (typeof Cesium.Ion !== "undefined") {
+      Cesium.Ion.defaultAccessToken = undefined;
+    }
+
+    (async function () {
+      const params = new URLSearchParams(window.location.search);
+      const tileset = params.get("tileset");
+      const info = document.getElementById("info");
+
+      // Same basemap as ocean-terrain-handler preview (ArcGIS World Imagery).
+      // Cesium 1.107+ requires fromUrl(); older sync constructor leaves _resource undefined.
+      let baseProvider;
+      if (Cesium.ArcGisMapServerImageryProvider.fromUrl) {
+        baseProvider = await Cesium.ArcGisMapServerImageryProvider.fromUrl(
+          "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer",
+        );
+      } else {
+        baseProvider = new Cesium.UrlTemplateImageryProvider({
+          url: "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+          maximumLevel: 19,
+        });
+      }
+
+      const viewer = new Cesium.Viewer("cesiumContainer", {
+        baseLayer: new Cesium.ImageryLayer(baseProvider),
+        terrainProvider: new Cesium.EllipsoidTerrainProvider(),
+        animation: false,
+        timeline: false,
+        baseLayerPicker: false,
+        geocoder: false,
+        homeButton: false,
+        sceneModePicker: false,
+        navigationHelpButton: false,
+      });
+      viewer.scene.globe.enableLighting = false;
+
+      if (!tileset) {
+        info.textContent = "Missing ?tileset={name} query parameter";
+        return;
+      }
+
+      function parseBounds(bounds) {
+        if (!Array.isArray(bounds) || bounds.length !== 4) return null;
+        const [west, south, east, north] = bounds.map(Number);
+        if ([west, south, east, north].some((v) => Number.isNaN(v))) return null;
+        if (west < -180 || east > 180 || south < -90 || north > 90) return null;
+        if (west >= east || south >= north) return null;
+        return { west, south, east, north };
+      }
+
+      const metadataUrl = `/imagery/${tileset}/imagery.json`;
+      try {
+        const response = await fetch(metadataUrl);
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        const meta = await response.json();
+        let urlTemplate = meta.urlTemplate || `/imagery/${tileset}/{z}/{x}/{y}.png`;
+        try {
+          const templateUrl = new URL(urlTemplate, window.location.origin);
+          urlTemplate = templateUrl.pathname + templateUrl.search;
+        } catch (_) {
+          // Keep relative templates as-is.
+        }
+        const bounds = parseBounds(meta.bounds) || parseBounds(meta.cesium?.rectangle);
+        const minLevel = meta.minimumLevel ?? meta.cesium?.minimumLevel ?? 0;
+        const maxLevel = meta.maximumLevel ?? meta.cesium?.maximumLevel ?? 18;
+        const scheme = meta.tilingScheme === "web-mercator"
+          ? new Cesium.WebMercatorTilingScheme()
+          : new Cesium.GeographicTilingScheme();
+
+        const providerOptions = {
+          url: urlTemplate,
+          tilingScheme: scheme,
+          minimumLevel: minLevel,
+          maximumLevel: maxLevel,
+        };
+        if (bounds) {
+          providerOptions.rectangle = Cesium.Rectangle.fromDegrees(
+            bounds.west,
+            bounds.south,
+            bounds.east,
+            bounds.north,
+          );
+        }
+
+        const provider = new Cesium.UrlTemplateImageryProvider(providerOptions);
+
+        viewer.imageryLayers.addImageryProvider(provider);
+        info.textContent = "Loaded tileset: " + tileset;
+
+        if (bounds) {
+          viewer.camera.flyTo({
+            destination: Cesium.Rectangle.fromDegrees(
+              bounds.west,
+              bounds.south,
+              bounds.east,
+              bounds.north,
+            ),
+          });
+        }
+      } catch (err) {
+        info.textContent = "Failed to load " + metadataUrl + ": " + err.message;
+      }
+    })();
+  </script>
+</body>
+</html>
