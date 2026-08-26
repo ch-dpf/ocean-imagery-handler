@@ -21,7 +21,7 @@ from app.schemas import (
     TilingOptions,
 )
 from app.services.job_store import CorruptJobDataError, JobStore
-from app.services.imagery_metadata import IMAGERY_JSON
+from app.services.tile_json import TILE_JSON
 from app.services.tile_publisher import PublishError, list_published_tilesets
 from app.worker.tasks import (
     create_job_from_path,
@@ -211,11 +211,12 @@ async def list_tilesets() -> TilesetListResponse:
     for name in names:
         url_template = None
         link_path = settings.tilesets_dir / name
-        metadata_path = link_path / IMAGERY_JSON
+        metadata_path = link_path / TILE_JSON
         if metadata_path.is_file():
             try:
                 meta = json.loads(metadata_path.read_text(encoding="utf-8"))
-                url_template = meta.get("urlTemplate")
+                tiles = meta.get("tiles") or []
+                url_template = tiles[0] if tiles else None
             except (json.JSONDecodeError, OSError):
                 pass
 

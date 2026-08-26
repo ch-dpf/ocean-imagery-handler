@@ -1,4 +1,4 @@
-"""Generate imagery.json metadata for Cesium clients."""
+"""Generate TileJSON 3.0 metadata (tile.json) for imagery tilesets."""
 
 import json
 import logging
@@ -8,7 +8,8 @@ from app.schemas import TileFormat, TileProfile, TileScheme
 
 logger = logging.getLogger(__name__)
 
-IMAGERY_JSON = "imagery.json"
+TILE_JSON = "tile.json"
+TILEJSON_VERSION = "3.0.0"
 
 TILE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
@@ -29,7 +30,7 @@ def _bounds_valid_wgs84(bounds: list[float] | list) -> bool:
     )
 
 
-class ImageryMetadataError(RuntimeError):
+class TileJsonError(RuntimeError):
     pass
 
 
@@ -76,7 +77,7 @@ def detect_tile_extension(tiles_dir: Path) -> str:
     return "png"
 
 
-def build_imagery_json(
+def build_tile_json(
     tiles_dir: Path,
     profile: TileProfile,
     tile_format: TileFormat,
@@ -85,10 +86,10 @@ def build_imagery_json(
     tileset_name: str,
     tile_scheme: TileScheme = TileScheme.XYZ,
 ) -> dict:
-    """Build imagery.json for Cesium UrlTemplateImageryProvider."""
+    """Build TileJSON 3.0 for an XYZ/TMS imagery tileset."""
     levels = scan_tile_extents(tiles_dir)
     if not levels:
-        raise ImageryMetadataError(f"No imagery tiles found under {tiles_dir}")
+        raise TileJsonError(f"No imagery tiles found under {tiles_dir}")
 
     min_zoom = min(levels)
     max_zoom = max(levels)
@@ -97,43 +98,28 @@ def build_imagery_json(
         ext = "jpg"
 
     base = imagery_base_url.rstrip("/")
-    y_placeholder = "{reverseY}" if tile_scheme == TileScheme.TMS else "{y}"
-    url_template = f"{base}/{tileset_name}/{{z}}/{{x}}/{y_placeholder}.{ext}"
+    # TileJSON always uses {y}; clients honor scheme (xyz|tms) for Y orientation.
+    tile_url = f"{base}/{tileset_name}/{{z}}/{{x}}/{{y}}.{ext}"
 
-    tiling_scheme = "web-mercator" if profile == TileProfile.MERCATOR else "geographic"
-    flip_y = tile_scheme == TileScheme.TMS
+    west, south, east, north = [float(v) for v in bounds_wgs84]
+    center_zoom = (min_zoom + max_zoom) // 2
+
+    # profile is retained for API symmetry; TileJSON assumes Web Mercator XYZ/TMS.
+    _ = profile, tile_format
 
     return {
+        "tilejson": TILEJSON_VERSION,
         "name": tileset_name,
-        "format": tile_format.value,
-        "tilingScheme": tiling_scheme,
-        "tileScheme": tile_scheme.value,
-        "projection": "EPSG:3857" if profile == TileProfile.MERCATOR else "EPSG:4326",
-        "bounds": bounds_wgs84,
-        "minimumLevel": min_zoom,
-        "maximumLevel": max_zoom,
-        "tileWidth": 256,
-        "tileHeight": 256,
-        "urlTemplate": url_template,
-        "flipY": flip_y,
-        "levels": {
-            str(z): {"minX": v[0], "minY": v[1], "maxX": v[2], "maxY": v[3]}
-            for z, v in levels.items()
-        },
-        "cesium": {
-            "tilingSchemeClass": (
-                "WebMercatorTilingScheme" if profile == TileProfile.MERCATOR else "GeographicTilingScheme"
-            ),
-            "urlTemplate": url_template,
-            "minimumLevel": min_zoom,
-            "maximumLevel": max_zoom,
-            "rectangle": bounds_wgs84,
-            "flipY": flip_y,
-        },
+        "scheme": tile_scheme.value,
+        "tiles": [tile_url],
+        "minzoom": min_zoom,
+        "maxzoom": max_zoom,
+        "bounds": [west, south, east, north],
+        "center": [(west + east) / 2.0, (south + north) / 2.0, center_zoom],
     }
 
 
-def ensure_imagery_json(
+def ensure_tile_json(
     tiles_dir: Path,
     profile: TileProfile,
     tile_format: TileFormat,
@@ -142,33 +128,40 @@ def ensure_imagery_json(
     tileset_name: str,
     tile_scheme: TileScheme = TileScheme.XYZ,
 ) -> Path:
-    """Ensure imagery.json exists in tiles_dir; generate if missing."""
-    metadata_path = tiles_dir / IMAGERY_JSON
+    """Ensure tile.json exists in tiles_dir; generate if missing or stale."""
+    metadata_path = tiles_dir / TILE_JSON
+    # Drop legacy Cesium-oriented metadata if present.
+    legacy_path = tiles_dir / "imagery.json"
+    if legacy_path.is_file():
+        legacy_path.unlink(missing_ok=True)
 
     if metadata_path.is_file():
         try:
             data = json.loads(metadata_path.read_text(encoding="utf-8"))
             expected_prefix = f"{imagery_base_url.rstrip('/')}/{tileset_name}/"
-            existing_template = data.get("urlTemplate") or ""
+            tiles = data.get("tiles") or []
+            existing_template = tiles[0] if tiles else ""
             if (
-                existing_template.startswith(expected_prefix)
-                and data.get("maximumLevel") is not None
+                isinstance(existing_template, str)
+                and existing_template.startswith(expected_prefix)
+                and data.get("maxzoom") is not None
                 and _bounds_valid_wgs84(data.get("bounds", []))
-                and data.get("tileScheme", TileScheme.XYZ.value) == tile_scheme.value
+                and data.get("scheme", TileScheme.XYZ.value) == tile_scheme.value
+                and data.get("tilejson") == TILEJSON_VERSION
             ):
-                logger.info("Using existing imagery.json at %s", metadata_path)
+                logger.info("Using existing tile.json at %s", metadata_path)
                 return metadata_path
             if existing_template and not existing_template.startswith(expected_prefix):
                 logger.warning(
-                    "Regenerating imagery.json at %s due to public URL change",
+                    "Regenerating tile.json at %s due to public URL change",
                     metadata_path,
                 )
-            elif data.get("urlTemplate") and data.get("maximumLevel") is not None:
-                logger.warning("Regenerating imagery.json at %s due to invalid bounds", metadata_path)
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning("Invalid imagery.json at %s, regenerating: %s", metadata_path, exc)
+            elif tiles and data.get("maxzoom") is not None:
+                logger.warning("Regenerating tile.json at %s due to invalid bounds", metadata_path)
+        except (json.JSONDecodeError, OSError, IndexError, TypeError) as exc:
+            logger.warning("Invalid tile.json at %s, regenerating: %s", metadata_path, exc)
 
-    content = build_imagery_json(
+    content = build_tile_json(
         tiles_dir,
         profile,
         tile_format,
@@ -178,5 +171,5 @@ def ensure_imagery_json(
         tile_scheme,
     )
     metadata_path.write_text(json.dumps(content, indent=2), encoding="utf-8")
-    logger.info("Wrote imagery.json to %s", metadata_path)
+    logger.info("Wrote tile.json to %s", metadata_path)
     return metadata_path

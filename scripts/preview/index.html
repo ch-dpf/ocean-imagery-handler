@@ -68,14 +68,13 @@
         return { west, south, east, north };
       }
 
-      const metadataUrl = `/imagery/${tileset}/imagery.json`;
+      const metadataUrl = `/imagery/${tileset}/tile.json`;
       try {
         const response = await fetch(metadataUrl);
         if (!response.ok) throw new Error("HTTP " + response.status);
         const meta = await response.json();
-        let urlTemplate = meta.urlTemplate || `/imagery/${tileset}/{z}/{x}/{y}.png`;
-        const isTms = meta.tileScheme === "tms" || meta.flipY === true || meta.cesium?.flipY === true;
-        if (isTms) {
+        let urlTemplate = (meta.tiles && meta.tiles[0]) || `/imagery/${tileset}/{z}/{x}/{y}.png`;
+        if (meta.scheme === "tms") {
           urlTemplate = urlTemplate.replace("{y}", "{reverseY}");
         }
         try {
@@ -84,12 +83,10 @@
         } catch (_) {
           // Keep relative templates as-is.
         }
-        const bounds = parseBounds(meta.bounds) || parseBounds(meta.cesium?.rectangle);
-        const minLevel = meta.minimumLevel ?? meta.cesium?.minimumLevel ?? 0;
-        const maxLevel = meta.maximumLevel ?? meta.cesium?.maximumLevel ?? 18;
-        const scheme = meta.tilingScheme === "web-mercator"
-          ? new Cesium.WebMercatorTilingScheme()
-          : new Cesium.GeographicTilingScheme();
+        const bounds = parseBounds(meta.bounds);
+        const minLevel = meta.minzoom ?? 0;
+        const maxLevel = meta.maxzoom ?? 18;
+        const scheme = new Cesium.WebMercatorTilingScheme();
 
         const providerOptions = {
           url: urlTemplate,

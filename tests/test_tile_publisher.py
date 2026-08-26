@@ -29,7 +29,7 @@ def tile_dirs(tmp_path: Path):
     return tiles_dir, tilesets_dir, bounds
 
 
-def test_publish_tileset_creates_symlink_and_imagery_json(tile_dirs):
+def test_publish_tileset_creates_symlink_and_tile_json(tile_dirs):
     tiles_dir, tilesets_dir, bounds = tile_dirs
     if os.name == "nt":
         pytest.skip("Symlink creation may require elevated privileges on Windows")
@@ -49,7 +49,7 @@ def test_publish_tileset_creates_symlink_and_imagery_json(tile_dirs):
     assert imagery_url == "http://localhost:8102/imagery/job-1"
     assert "{z}" in url_template
     assert (tilesets_dir / "job-1").is_symlink()
-    assert (tiles_dir / "imagery.json").is_file()
+    assert (tiles_dir / "tile.json").is_file()
     assert list_published_tilesets(tilesets_dir) == ["job-1"]
 
 

@@ -1,4 +1,4 @@
-"""imagery.json generation tests."""
+"""tile.json (TileJSON 3.0) generation tests."""
 
 import json
 from pathlib import Path
@@ -6,10 +6,10 @@ from pathlib import Path
 import pytest
 
 from app.schemas import TileFormat, TileProfile, TileScheme
-from app.services.imagery_metadata import (
-    ImageryMetadataError,
-    build_imagery_json,
-    ensure_imagery_json,
+from app.services.tile_json import (
+    TileJsonError,
+    build_tile_json,
+    ensure_tile_json,
     scan_tile_extents,
 )
 
@@ -31,12 +31,12 @@ def test_scan_tile_extents_with_tiles(tmp_path: Path):
     assert levels[1] == (2, 4, 2, 4)
 
 
-def test_build_imagery_json_mercator(tmp_path: Path):
+def test_build_tile_json_mercator(tmp_path: Path):
     tiles_dir = tmp_path / "tiles"
     _make_tile(tiles_dir, 0, 0, 0)
     bounds = [116.0, 39.0, 117.0, 40.0]
 
-    meta = build_imagery_json(
+    meta = build_tile_json(
         tiles_dir,
         TileProfile.MERCATOR,
         TileFormat.PNG,
@@ -44,20 +44,25 @@ def test_build_imagery_json_mercator(tmp_path: Path):
         "http://localhost:8102/imagery",
         "test-set",
     )
-    assert meta["tilingScheme"] == "web-mercator"
-    assert meta["projection"] == "EPSG:3857"
-    assert "test-set" in meta["urlTemplate"]
-    assert meta["cesium"]["tilingSchemeClass"] == "WebMercatorTilingScheme"
-    assert meta["tileScheme"] == "xyz"
-    assert meta["flipY"] is False
+    assert meta["tilejson"] == "3.0.0"
+    assert meta["scheme"] == "xyz"
+    assert meta["minzoom"] == 0
+    assert meta["maxzoom"] == 0
+    assert meta["bounds"] == bounds
+    assert meta["center"] == [116.5, 39.5, 0]
+    assert len(meta["tiles"]) == 1
+    assert "test-set" in meta["tiles"][0]
+    assert meta["tiles"][0].endswith("/{z}/{x}/{y}.png")
+    assert "urlTemplate" not in meta
+    assert "cesium" not in meta
 
 
-def test_build_imagery_json_tms(tmp_path: Path):
+def test_build_tile_json_tms(tmp_path: Path):
     tiles_dir = tmp_path / "tiles"
     _make_tile(tiles_dir, 0, 0, 0)
     bounds = [116.0, 39.0, 117.0, 40.0]
 
-    meta = build_imagery_json(
+    meta = build_tile_json(
         tiles_dir,
         TileProfile.MERCATOR,
         TileFormat.PNG,
@@ -66,16 +71,14 @@ def test_build_imagery_json_tms(tmp_path: Path):
         "test-set",
         tile_scheme=TileScheme.TMS,
     )
-    assert meta["tileScheme"] == "tms"
-    assert meta["flipY"] is True
-    assert meta["cesium"]["flipY"] is True
-    assert "{reverseY}" in meta["urlTemplate"]
-    assert "{y}" not in meta["urlTemplate"]
+    assert meta["scheme"] == "tms"
+    assert "{y}" in meta["tiles"][0]
+    assert "{reverseY}" not in meta["tiles"][0]
 
 
-def test_build_imagery_json_empty_raises(tmp_path: Path):
-    with pytest.raises(ImageryMetadataError):
-        build_imagery_json(
+def test_build_tile_json_empty_raises(tmp_path: Path):
+    with pytest.raises(TileJsonError):
+        build_tile_json(
             tmp_path / "empty",
             TileProfile.MERCATOR,
             TileFormat.PNG,
@@ -85,11 +88,13 @@ def test_build_imagery_json_empty_raises(tmp_path: Path):
         )
 
 
-def test_ensure_imagery_json_writes_file(tmp_path: Path):
+def test_ensure_tile_json_writes_file(tmp_path: Path):
     tiles_dir = tmp_path / "tiles"
     _make_tile(tiles_dir, 0, 0, 0)
+    legacy = tiles_dir / "imagery.json"
+    legacy.write_text("{}", encoding="utf-8")
 
-    meta_path = ensure_imagery_json(
+    meta_path = ensure_tile_json(
         tiles_dir,
         TileProfile.MERCATOR,
         TileFormat.PNG,
@@ -98,5 +103,8 @@ def test_ensure_imagery_json_writes_file(tmp_path: Path):
         "job-1",
     )
     assert meta_path.is_file()
+    assert meta_path.name == "tile.json"
+    assert not legacy.exists()
     data = json.loads(meta_path.read_text(encoding="utf-8"))
-    assert data["maximumLevel"] == 0
+    assert data["maxzoom"] == 0
+    assert data["tilejson"] == "3.0.0"

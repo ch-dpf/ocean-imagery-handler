@@ -30,7 +30,7 @@ Cesium 客户端 → imagery-server :8102/imagery/{name}/{z}/{x}/{y}.png
 2. **投影** — `gdalwarp` 转为 EPSG:3857（Web Mercator，Cesium 推荐）
 3. **概览图** — `gdaladdo` 加速大文件切片
 4. **切片** — `gdal raster tile` 生成 `{z}/{x}/{y}.png`
-5. **元数据** — 生成 `imagery.json`（bounds、zoom、Cesium URL 模板）
+5. **元数据** — 生成标准 `tile.json`（TileJSON 3.0：bounds、zoom、tiles URL）
 6. **发布** — 注册到 `data/tilesets/imagery/{name}`，由 Nginx 对外服务
 
 ## 快速开始
@@ -100,14 +100,19 @@ curl http://localhost:8100/api/v1/imagery/jobs/{job_id}
 ### Cesium 客户端加载
 
 ```javascript
-const response = await fetch("http://localhost:8102/imagery/{job_id}/imagery.json");
+const response = await fetch("http://localhost:8102/imagery/{job_id}/tile.json");
 const meta = await response.json();
 
+let url = meta.tiles[0];
+if (meta.scheme === "tms") {
+  url = url.replace("{y}", "{reverseY}");
+}
+
 const imageryProvider = new Cesium.UrlTemplateImageryProvider({
-  url: meta.urlTemplate,
+  url,
   tilingScheme: new Cesium.WebMercatorTilingScheme(),
-  minimumLevel: meta.minimumLevel,
-  maximumLevel: meta.maximumLevel,
+  minimumLevel: meta.minzoom,
+  maximumLevel: meta.maxzoom,
   rectangle: Cesium.Rectangle.fromDegrees(
     meta.bounds[0], meta.bounds[1], meta.bounds[2], meta.bounds[3]
   ),
@@ -195,7 +200,7 @@ ocean-imagery-handler/
 │   ├── services/
 │   │   ├── preprocessor.py    # GDAL 预处理
 │   │   ├── tiler_runner.py    # gdal raster tile
-│   │   ├── imagery_metadata.py# imagery.json
+│   │   ├── tile_json.py       # tile.json (TileJSON 3.0)
 │   │   ├── tile_publisher.py  # 瓦片发布注册
 │   │   └── job_store.py
 │   └── worker/

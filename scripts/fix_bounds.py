@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fix imagery.json bounds that were stored as EPSG:3857 metres."""
+"""Fix tile.json bounds that were stored as EPSG:3857 metres."""
 
 import json
 import subprocess
@@ -28,13 +28,15 @@ def wgs84_bounds(dataset: Path) -> list[float]:
     return [min(lons), min(lats), max(lons), max(lats)]
 
 
-def fix_imagery_json(imagery_json: Path, bounds: list[float]) -> None:
-    data = json.loads(imagery_json.read_text(encoding="utf-8"))
+def fix_tile_json(tile_json: Path, bounds: list[float]) -> None:
+    data = json.loads(tile_json.read_text(encoding="utf-8"))
     data["bounds"] = bounds
-    if isinstance(data.get("cesium"), dict):
-        data["cesium"]["rectangle"] = bounds
-    imagery_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    print(f"Updated {imagery_json} -> {bounds}")
+    if isinstance(data.get("center"), list) and len(data["center"]) >= 2:
+        west, south, east, north = bounds
+        zoom = data["center"][2] if len(data["center"]) > 2 else 0
+        data["center"] = [(west + east) / 2.0, (south + north) / 2.0, zoom]
+    tile_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    print(f"Updated {tile_json} -> {bounds}")
 
 
 def main() -> int:
@@ -46,15 +48,15 @@ def main() -> int:
     for job_id in sys.argv[1:]:
         job_dir = workspace / "jobs" / job_id
         dataset = job_dir / "preprocess" / "preprocessed.tif"
-        imagery_json = job_dir / "tiles" / "imagery.json"
+        tile_json = job_dir / "tiles" / "tile.json"
         if not dataset.is_file():
             print(f"Skip {job_id}: missing {dataset}")
             continue
-        if not imagery_json.is_file():
-            print(f"Skip {job_id}: missing {imagery_json}")
+        if not tile_json.is_file():
+            print(f"Skip {job_id}: missing {tile_json}")
             continue
         bounds = wgs84_bounds(dataset)
-        fix_imagery_json(imagery_json, bounds)
+        fix_tile_json(tile_json, bounds)
     return 0
 
 

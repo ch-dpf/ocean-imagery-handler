@@ -6,7 +6,7 @@ import shutil
 from pathlib import Path
 
 from app.schemas import TileFormat, TileProfile, TileScheme
-from app.services.imagery_metadata import ImageryMetadataError, ensure_imagery_json
+from app.services.tile_json import TileJsonError, ensure_tile_json
 
 logger = logging.getLogger(__name__)
 
@@ -74,9 +74,9 @@ def publish_tileset(
     tile_scheme: TileScheme = TileScheme.XYZ,
 ) -> tuple[str, str, str]:
     """
-    Prepare imagery.json and register tiles for nginx imagery-server.
+    Prepare tile.json (TileJSON 3.0) and register tiles for nginx imagery-server.
 
-    Returns (imagery_url, resolved_tileset_name, cesium_url_template).
+    Returns (imagery_url, resolved_tileset_name, tile_url_template).
     """
     if not tiles_dir.is_dir():
         raise PublishError(f"Tiles directory not found: {tiles_dir}")
@@ -88,7 +88,7 @@ def publish_tileset(
     imagery_base_url = f"{base}{path}"
 
     try:
-        metadata = ensure_imagery_json(
+        metadata = ensure_tile_json(
             tiles_dir,
             profile,
             tile_format,
@@ -97,13 +97,14 @@ def publish_tileset(
             name,
             tile_scheme,
         )
-    except ImageryMetadataError as exc:
+    except TileJsonError as exc:
         raise PublishError(str(exc)) from exc
 
     import json
 
     metadata_data = json.loads(metadata.read_text(encoding="utf-8"))
-    url_template = metadata_data.get("urlTemplate", "")
+    tiles = metadata_data.get("tiles") or []
+    url_template = tiles[0] if tiles else ""
 
     _register_tileset_link(tilesets_dir, name, tiles_dir)
 

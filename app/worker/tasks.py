@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from app.config import get_settings
 from app.schemas import ImageryJobCreate, JobStatus
-from app.services.imagery_metadata import ImageryMetadataError, _bounds_valid_wgs84
+from app.services.tile_json import TileJsonError, _bounds_valid_wgs84
 from app.services.job_store import JobStore
 from app.services.preprocessor import PreprocessError, parse_wgs84_bounds, preprocess_imagery
 from app.services.tile_publisher import PublishError, publish_tileset
@@ -138,7 +138,7 @@ def process_imagery_job(self, job_id: str, request_data: dict) -> dict:
         PreprocessError,
         TilerError,
         PublishError,
-        ImageryMetadataError,
+        TileJsonError,
         OSError,
         ValueError,
     ) as exc:
@@ -179,9 +179,10 @@ def publish_completed_job(job_id: str, tileset_name: str | None = None) -> tuple
                 env={"GDAL_CACHEMAX": str(settings.gdal_cachemax)},
             )
             store.update(job_id, bounds_wgs84=bounds_wgs84)
-            # Force imagery.json regeneration with corrected bounds.
-            imagery_json = Path(output_dir) / "imagery.json"
-            imagery_json.unlink(missing_ok=True)
+            # Force tile.json regeneration with corrected bounds.
+            tile_json = Path(output_dir) / "tile.json"
+            tile_json.unlink(missing_ok=True)
+            (Path(output_dir) / "imagery.json").unlink(missing_ok=True)
 
     request_data = data.get("request") or {}
     request = ImageryJobCreate.model_validate(request_data)
