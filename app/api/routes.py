@@ -20,7 +20,7 @@ from app.schemas import (
     TilesetListResponse,
     TilingOptions,
 )
-from app.services.job_store import JobStore
+from app.services.job_store import CorruptJobDataError, JobStore
 from app.services.imagery_metadata import IMAGERY_JSON
 from app.services.tile_publisher import PublishError, list_published_tilesets
 from app.worker.tasks import (
@@ -142,7 +142,13 @@ async def create_job_with_upload(
 @router.get("/jobs/{job_id}", response_model=ImageryJobDetail)
 async def get_job(job_id: str) -> ImageryJobDetail:
     """Get job status and result paths."""
-    data = _store().get(job_id)
+    try:
+        data = _store().get(job_id)
+    except CorruptJobDataError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Job metadata is corrupted in the store",
+        ) from exc
     if data is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -163,7 +169,13 @@ async def publish_job(
     except PublishError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    data = _store().get(job_id)
+    try:
+        data = _store().get(job_id)
+    except CorruptJobDataError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Job metadata is corrupted in the store",
+        ) from exc
     assert data is not None
     return _job_detail_from_store(data)
 
@@ -178,7 +190,13 @@ async def unpublish_job(job_id: str) -> ImageryJobDetail:
     except PublishError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    data = _store().get(job_id)
+    try:
+        data = _store().get(job_id)
+    except CorruptJobDataError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Job metadata is corrupted in the store",
+        ) from exc
     assert data is not None
     return _job_detail_from_store(data)
 

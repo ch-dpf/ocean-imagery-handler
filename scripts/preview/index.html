@@ -74,6 +74,10 @@
         if (!response.ok) throw new Error("HTTP " + response.status);
         const meta = await response.json();
         let urlTemplate = meta.urlTemplate || `/imagery/${tileset}/{z}/{x}/{y}.png`;
+        const isTms = meta.tileScheme === "tms" || meta.flipY === true || meta.cesium?.flipY === true;
+        if (isTms) {
+          urlTemplate = urlTemplate.replace("{y}", "{reverseY}");
+        }
         try {
           const templateUrl = new URL(urlTemplate, window.location.origin);
           urlTemplate = templateUrl.pathname + templateUrl.search;

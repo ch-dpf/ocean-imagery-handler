@@ -5,7 +5,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from app.schemas import TilingOptions
+from app.schemas import TileScheme, TilingOptions
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +37,10 @@ def build_gdal2tiles_command(
         str(options.tile_size),
         "-w",
         "none",
-        "--xyz",
     ]
+
+    if options.tile_scheme == TileScheme.XYZ:
+        cmd.append("--xyz")
 
     if options.start_zoom is not None:
         cmd.extend(["--zoom", f"{options.end_zoom}-{options.start_zoom}"])
@@ -62,7 +64,7 @@ def run_gdal2tiles(
     options: TilingOptions,
     gdal_cachemax: int,
 ) -> None:
-    """Run gdal2tiles to produce TMS/XYZ tiles."""
+    """Run gdal2tiles to produce tiles in the configured scheme (XYZ or TMS)."""
     output_dir.mkdir(parents=True, exist_ok=True)
     env = {"GDAL_CACHEMAX": str(gdal_cachemax)}
     cmd = build_gdal2tiles_command(input_path, output_dir, options)

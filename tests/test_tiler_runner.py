@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from app.schemas import TileProfile, TilingOptions
+from app.schemas import TileProfile, TileScheme, TilingOptions
 from app.services.tiler_runner import build_gdal2tiles_command, GDAL2TILES_BIN
 
 
@@ -25,6 +25,18 @@ def test_build_gdal2tiles_command_zoom_range():
     assert "--tiledriver" in cmd
     assert "PNG" in cmd
     assert "--xyz" in cmd
+
+
+def test_build_gdal2tiles_command_tms_omits_xyz():
+    if GDAL2TILES_BIN is None:
+        pytest.skip("gdal2tiles not installed")
+
+    cmd = build_gdal2tiles_command(
+        Path("/data/input.tif"),
+        Path("/data/output"),
+        TilingOptions(profile=TileProfile.MERCATOR, tile_scheme=TileScheme.TMS),
+    )
+    assert "--xyz" not in cmd
 
 
 def test_build_gdal2tiles_command_auto_zoom():

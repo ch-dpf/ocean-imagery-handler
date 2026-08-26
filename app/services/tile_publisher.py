@@ -5,7 +5,7 @@ import os
 import shutil
 from pathlib import Path
 
-from app.schemas import TileFormat, TileProfile
+from app.schemas import TileFormat, TileProfile, TileScheme
 from app.services.imagery_metadata import ImageryMetadataError, ensure_imagery_json
 
 logger = logging.getLogger(__name__)
@@ -71,6 +71,7 @@ def publish_tileset(
     tile_format: TileFormat,
     bounds_wgs84: list[float],
     tileset_name: str | None = None,
+    tile_scheme: TileScheme = TileScheme.XYZ,
 ) -> tuple[str, str, str]:
     """
     Prepare imagery.json and register tiles for nginx imagery-server.
@@ -94,6 +95,7 @@ def publish_tileset(
             bounds_wgs84,
             imagery_base_url,
             name,
+            tile_scheme,
         )
     except ImageryMetadataError as exc:
         raise PublishError(str(exc)) from exc

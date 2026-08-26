@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from app.schemas import ImageryJobCreate, PreprocessOptions, TilingOptions
+from app.schemas import ImageryJobCreate, PreprocessOptions, TileScheme, TilingOptions
 
 
 def test_default_job_request():
@@ -11,6 +11,13 @@ def test_default_job_request():
     assert request.preprocess.target_crs == "EPSG:3857"
     assert request.preprocess.block_size == 256
     assert request.tiling_options.profile.value == "mercator"
+    assert request.tiling_options.tile_scheme == TileScheme.XYZ
+
+
+def test_tiling_options_tile_scheme_tms():
+    options = TilingOptions(tile_scheme=TileScheme.TMS)
+    assert options.tile_scheme == TileScheme.TMS
+    assert options.model_dump()["tile_scheme"] == "tms"
 
 
 def test_tiling_options_serialization():

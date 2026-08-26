@@ -39,6 +39,11 @@ class TileFormat(str, Enum):
     WEBP = "WEBP"
 
 
+class TileScheme(str, Enum):
+    XYZ = "xyz"
+    TMS = "tms"
+
+
 class PreprocessOptions(BaseModel):
     target_crs: str = Field(
         default="EPSG:3857",
@@ -57,7 +62,7 @@ class PreprocessOptions(BaseModel):
         description="Add alpha band so areas outside the imagery footprint stay transparent in tiles",
     )
     white_as_transparent: bool = Field(
-        default=True,
+        default=False,
         description="Treat exact white RGB(255,255,255) fill as transparent during gdalwarp",
     )
     near_white: int = Field(
@@ -94,6 +99,10 @@ class TilingOptions(BaseModel):
     verbose: bool = False
     kml: bool = Field(default=False, description="Generate KML overview")
     nb_packs: int | None = Field(default=None, ge=1, description="Tile packs per gdal2tiles process")
+    tile_scheme: TileScheme = Field(
+        default=TileScheme.XYZ,
+        description="Tile coordinate scheme: xyz (Slippy/OSM, default) or tms",
+    )
 
 
 class PublishOptions(BaseModel):

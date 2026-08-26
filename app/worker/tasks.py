@@ -47,6 +47,7 @@ def _publish_job_tileset(
         tile_format=request.tiling_options.tile_format,
         bounds_wgs84=bounds_wgs84,
         tileset_name=request.publish.tileset_name,
+        tile_scheme=request.tiling_options.tile_scheme,
     )
     return imagery_url, tileset_name, url_template
 
@@ -210,23 +211,36 @@ def publish_completed_job(job_id: str, tileset_name: str | None = None) -> tuple
 
 def unpublish_completed_job(job_id: str) -> None:
     """Remove published tileset for a job."""
+    from app.services.job_store import CorruptJobDataError
     from app.services.tile_publisher import unpublish_tileset
 
     settings = get_settings()
     store = _store()
-    data = store.get(job_id)
-    if data is None:
+    tileset_name = job_id
+    corrupt_metadata = False
+
+    try:
+        data = store.get(job_id)
+    except CorruptJobDataError:
+        corrupt_metadata = True
+        data = None
+
+    if data is None and not corrupt_metadata:
         raise ValueError(f"Job not found: {job_id}")
 
-    tileset_name = data.get("tileset_name") or job_id
+    if data is not None:
+        tileset_name = data.get("tileset_name") or job_id
+
     unpublish_tileset(settings.tilesets_dir, tileset_name)
-    store.update(
-        job_id,
-        published=False,
-        imagery_url=None,
-        tileset_name=None,
-        cesium_url_template=None,
-    )
+    update_fields: dict[str, object] = {
+        "published": False,
+        "imagery_url": None,
+        "tileset_name": None,
+        "cesium_url_template": None,
+    }
+    if corrupt_metadata:
+        update_fields["status"] = JobStatus.COMPLETED.value
+    store.update(job_id, **update_fields)
 
 
 def create_job_from_upload(

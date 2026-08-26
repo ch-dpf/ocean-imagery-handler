@@ -4,7 +4,7 @@ import json
 import logging
 from pathlib import Path
 
-from app.schemas import TileFormat, TileProfile
+from app.schemas import TileFormat, TileProfile, TileScheme
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +83,7 @@ def build_imagery_json(
     bounds_wgs84: list[float],
     imagery_base_url: str,
     tileset_name: str,
+    tile_scheme: TileScheme = TileScheme.XYZ,
 ) -> dict:
     """Build imagery.json for Cesium UrlTemplateImageryProvider."""
     levels = scan_tile_extents(tiles_dir)
@@ -96,14 +97,17 @@ def build_imagery_json(
         ext = "jpg"
 
     base = imagery_base_url.rstrip("/")
-    url_template = f"{base}/{tileset_name}/{{z}}/{{x}}/{{y}}.{ext}"
+    y_placeholder = "{reverseY}" if tile_scheme == TileScheme.TMS else "{y}"
+    url_template = f"{base}/{tileset_name}/{{z}}/{{x}}/{y_placeholder}.{ext}"
 
     tiling_scheme = "web-mercator" if profile == TileProfile.MERCATOR else "geographic"
+    flip_y = tile_scheme == TileScheme.TMS
 
     return {
         "name": tileset_name,
         "format": tile_format.value,
         "tilingScheme": tiling_scheme,
+        "tileScheme": tile_scheme.value,
         "projection": "EPSG:3857" if profile == TileProfile.MERCATOR else "EPSG:4326",
         "bounds": bounds_wgs84,
         "minimumLevel": min_zoom,
@@ -111,7 +115,7 @@ def build_imagery_json(
         "tileWidth": 256,
         "tileHeight": 256,
         "urlTemplate": url_template,
-        "flipY": False,
+        "flipY": flip_y,
         "levels": {
             str(z): {"minX": v[0], "minY": v[1], "maxX": v[2], "maxY": v[3]}
             for z, v in levels.items()
@@ -124,6 +128,7 @@ def build_imagery_json(
             "minimumLevel": min_zoom,
             "maximumLevel": max_zoom,
             "rectangle": bounds_wgs84,
+            "flipY": flip_y,
         },
     }
 
@@ -135,6 +140,7 @@ def ensure_imagery_json(
     bounds_wgs84: list[float],
     imagery_base_url: str,
     tileset_name: str,
+    tile_scheme: TileScheme = TileScheme.XYZ,
 ) -> Path:
     """Ensure imagery.json exists in tiles_dir; generate if missing."""
     metadata_path = tiles_dir / IMAGERY_JSON
@@ -148,6 +154,7 @@ def ensure_imagery_json(
                 existing_template.startswith(expected_prefix)
                 and data.get("maximumLevel") is not None
                 and _bounds_valid_wgs84(data.get("bounds", []))
+                and data.get("tileScheme", TileScheme.XYZ.value) == tile_scheme.value
             ):
                 logger.info("Using existing imagery.json at %s", metadata_path)
                 return metadata_path
@@ -162,7 +169,13 @@ def ensure_imagery_json(
             logger.warning("Invalid imagery.json at %s, regenerating: %s", metadata_path, exc)
 
     content = build_imagery_json(
-        tiles_dir, profile, tile_format, bounds_wgs84, imagery_base_url, tileset_name
+        tiles_dir,
+        profile,
+        tile_format,
+        bounds_wgs84,
+        imagery_base_url,
+        tileset_name,
+        tile_scheme,
     )
     metadata_path.write_text(json.dumps(content, indent=2), encoding="utf-8")
     logger.info("Wrote imagery.json to %s", metadata_path)

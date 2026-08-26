@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app.schemas import TileFormat, TileProfile
+from app.schemas import TileFormat, TileProfile, TileScheme
 from app.services.imagery_metadata import (
     ImageryMetadataError,
     build_imagery_json,
@@ -48,6 +48,29 @@ def test_build_imagery_json_mercator(tmp_path: Path):
     assert meta["projection"] == "EPSG:3857"
     assert "test-set" in meta["urlTemplate"]
     assert meta["cesium"]["tilingSchemeClass"] == "WebMercatorTilingScheme"
+    assert meta["tileScheme"] == "xyz"
+    assert meta["flipY"] is False
+
+
+def test_build_imagery_json_tms(tmp_path: Path):
+    tiles_dir = tmp_path / "tiles"
+    _make_tile(tiles_dir, 0, 0, 0)
+    bounds = [116.0, 39.0, 117.0, 40.0]
+
+    meta = build_imagery_json(
+        tiles_dir,
+        TileProfile.MERCATOR,
+        TileFormat.PNG,
+        bounds,
+        "http://localhost:8102/imagery",
+        "test-set",
+        tile_scheme=TileScheme.TMS,
+    )
+    assert meta["tileScheme"] == "tms"
+    assert meta["flipY"] is True
+    assert meta["cesium"]["flipY"] is True
+    assert "{reverseY}" in meta["urlTemplate"]
+    assert "{y}" not in meta["urlTemplate"]
 
 
 def test_build_imagery_json_empty_raises(tmp_path: Path):
