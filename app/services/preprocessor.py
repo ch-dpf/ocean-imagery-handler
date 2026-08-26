@@ -160,7 +160,7 @@ def preprocess_imagery(
     options: PreprocessOptions,
     gdal_cachemax: int,
 ) -> Path:
-    """Run GDAL preprocessing and return path to gdal2tiles-ready raster."""
+    """Run GDAL preprocessing and return path to tiling-ready raster."""
     work_dir.mkdir(parents=True, exist_ok=True)
     env = {"GDAL_CACHEMAX": str(gdal_cachemax)}
 

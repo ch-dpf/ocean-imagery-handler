@@ -1,6 +1,6 @@
 # Ocean Imagery Handler
 
-正射影像 GeoTIFF 预处理与 Cesium 影像瓦片切片服务。基于 **FastAPI + Celery + Redis + GDAL gdal2tiles**，通过 **Nginx** 发布影像瓦片供 Cesium 加载。
+正射影像 GeoTIFF 预处理与 Cesium 影像瓦片切片服务。基于 **FastAPI + Celery + Redis + GDAL `gdal raster tile`**，通过 **Nginx** 发布影像瓦片供 Cesium 加载。
 
 与姊妹项目 [ocean-terrain-handler](D:\workspace\ocean-terrain-handler) 架构对齐：地形服务负责 DEM → `CesiumTerrainProvider`，本服务负责正射影像 → `UrlTemplateImageryProvider`。
 
@@ -9,7 +9,7 @@
 ```
 客户端 → FastAPI → Redis 队列 → Celery Worker
                                     ├─ GDAL 预处理 (gdalwarp / gdaladdo)
-                                    ├─ gdal2tiles → PNG/JPEG 瓦片
+                                    ├─ gdal raster tile → PNG/JPEG 瓦片
                                     └─ 注册 tileset → nginx 发布
 
 Cesium 客户端 → imagery-server :8102/imagery/{name}/{z}/{x}/{y}.png
@@ -19,7 +19,7 @@ Cesium 客户端 → imagery-server :8102/imagery/{name}/{z}/{x}/{y}.png
 | 组件 | 职责 |
 |------|------|
 | API | 接收任务、文件上传、查询状态、发布管理 |
-| Worker | GDAL 预处理 + gdal2tiles 切片 + 注册发布 |
+| Worker | GDAL 预处理 + `gdal raster tile` 切片 + 注册发布 |
 | Redis | 任务队列与状态存储 |
 | imagery-server | Nginx 静态瓦片 HTTP 服务 |
 | 工作目录 | 输入影像、中间产物、瓦片输出、发布注册 |
@@ -29,7 +29,7 @@ Cesium 客户端 → imagery-server :8102/imagery/{name}/{z}/{x}/{y}.png
 1. **校验** — `gdalinfo` 检查输入栅格
 2. **投影** — `gdalwarp` 转为 EPSG:3857（Web Mercator，Cesium 推荐）
 3. **概览图** — `gdaladdo` 加速大文件切片
-4. **切片** — `gdal2tiles.py` 生成 `{z}/{x}/{y}.png`
+4. **切片** — `gdal raster tile` 生成 `{z}/{x}/{y}.png`
 5. **元数据** — 生成 `imagery.json`（bounds、zoom、Cesium URL 模板）
 6. **发布** — 注册到 `data/tilesets/imagery/{name}`，由 Nginx 对外服务
 
@@ -38,7 +38,7 @@ Cesium 客户端 → imagery-server :8102/imagery/{name}/{z}/{x}/{y}.png
 ### 前置条件
 
 - Docker & Docker Compose
-- 无需额外切片镜像（GDAL 已内置在 API/Worker 镜像中）
+- 无需额外切片镜像（Worker 基于 `ghcr.io/osgeo/gdal:ubuntu-small-3.12.0`）
 
 ### 启动
 
@@ -143,14 +143,15 @@ viewer.imageryLayers.addImageryProvider(imageryProvider);
 
 | 字段 | 类型 | 默认 | 说明 |
 |------|------|------|------|
-| `profile` | string | `mercator` | `mercator` / `geodetic` / `raster` |
+| `profile` | string | `mercator` | `mercator` → WebMercatorQuad；`geodetic` → WorldCRS84Quad；`raster` |
 | `tile_format` | string | `PNG` | `PNG` / `JPEG` / `WEBP` |
 | `tile_size` | int | `256` | 瓦片像素尺寸 |
 | `start_zoom` | int | 自动 | 最大 zoom（最精细） |
 | `end_zoom` | int | `0` | 最小 zoom |
-| `resampling_method` | string | `bilinear` | gdal2tiles 重采样 |
-| `thread_count` | int | — | 并行进程数 |
+| `resampling_method` | string | `bilinear` | `gdal raster tile` 重采样（`antialias` 映射为 `lanczos`） |
+| `thread_count` | int | — | 并行任务数（`-j`） |
 | `resume` | bool | `false` | 断点续切 |
+| `tile_scheme` | string | `xyz` | `xyz` 或 `tms` |
 
 ### 发布 `publish`
 
@@ -180,7 +181,7 @@ uvicorn app.main:app --reload --port 8100
 celery -A app.worker.celery_app worker --loglevel=info
 ```
 
-本地 Worker 需安装 GDAL（`gdal-bin` 含 `gdal2tiles.py`）。
+本地 Worker 需安装 **GDAL ≥ 3.11**（含统一 CLI `gdal raster tile`）。推荐 3.12+。
 
 ## 项目结构
 
@@ -193,7 +194,7 @@ ocean-imagery-handler/
 │   ├── api/routes.py
 │   ├── services/
 │   │   ├── preprocessor.py    # GDAL 预处理
-│   │   ├── tiler_runner.py    # gdal2tiles
+│   │   ├── tiler_runner.py    # gdal raster tile
 │   │   ├── imagery_metadata.py# imagery.json
 │   │   ├── tile_publisher.py  # 瓦片发布注册
 │   │   └── job_store.py
@@ -227,6 +228,7 @@ ocean-imagery-handler/
 - 大文件建议设置 `start_zoom` / `end_zoom` 控制级别，避免磁盘爆满
 - 发布通过符号链接注册瓦片，Worker 需有创建 symlink 权限
 - `imagery-server` 挂载完整 `./data` 目录，以便 symlink 解析到 `jobs/` 下的瓦片
+- Docker 镜像基于 `ghcr.io/osgeo/gdal:ubuntu-small-3.12.0`（GDAL 3.12）
 
 ## License
 

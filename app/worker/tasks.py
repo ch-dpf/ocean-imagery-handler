@@ -11,7 +11,7 @@ from app.services.imagery_metadata import ImageryMetadataError, _bounds_valid_wg
 from app.services.job_store import JobStore
 from app.services.preprocessor import PreprocessError, parse_wgs84_bounds, preprocess_imagery
 from app.services.tile_publisher import PublishError, publish_tileset
-from app.services.tiler_runner import TilerError, run_gdal2tiles
+from app.services.tiler_runner import TilerError, run_raster_tile
 from app.worker.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -83,8 +83,8 @@ def process_imagery_job(self, job_id: str, request_data: dict) -> dict:
         bounds_wgs84 = parse_wgs84_bounds(preprocessed, env={"GDAL_CACHEMAX": str(settings.gdal_cachemax)})
         store.update(job_id, bounds_wgs84=bounds_wgs84)
 
-        store.update(job_id, status=JobStatus.TILING.value, stage="gdal2tiles")
-        run_gdal2tiles(
+        store.update(job_id, status=JobStatus.TILING.value, stage="gdal_raster_tile")
+        run_raster_tile(
             input_path=preprocessed,
             output_dir=output_dir,
             options=request.tiling_options,

@@ -83,7 +83,10 @@ class PreprocessOptions(BaseModel):
 class TilingOptions(BaseModel):
     profile: TileProfile = Field(
         default=TileProfile.MERCATOR,
-        description="gdal2tiles profile: mercator (Web Mercator) or geodetic",
+        description=(
+            "Tiling scheme profile: mercator (WebMercatorQuad), "
+            "geodetic (WorldCRS84Quad), or raster"
+        ),
     )
     tile_format: TileFormat = Field(default=TileFormat.PNG, description="Output tile image format")
     tile_size: int = Field(default=256, ge=1, description="Tile pixel size")
@@ -94,11 +97,14 @@ class TilingOptions(BaseModel):
     )
     end_zoom: int = Field(default=0, ge=0, description="Minimum zoom level")
     resampling_method: ResamplingMethod = ResamplingMethod.BILINEAR
-    thread_count: int | None = Field(default=None, ge=1, description="Parallel processes for gdal2tiles")
+    thread_count: int | None = Field(
+        default=None,
+        ge=1,
+        description="Parallel jobs for gdal raster tile (-j)",
+    )
     resume: bool = Field(default=False, description="Resume interrupted tiling")
     verbose: bool = False
     kml: bool = Field(default=False, description="Generate KML overview")
-    nb_packs: int | None = Field(default=None, ge=1, description="Tile packs per gdal2tiles process")
     tile_scheme: TileScheme = Field(
         default=TileScheme.XYZ,
         description="Tile coordinate scheme: xyz (Slippy/OSM, default) or tms",
