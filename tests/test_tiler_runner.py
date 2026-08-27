@@ -56,7 +56,21 @@ def test_build_raster_tile_command_auto_zoom():
         Path("/data/output"),
         TilingOptions(profile=TileProfile.MERCATOR),
     )
-    assert "--min-zoom" not in cmd
+    assert "--min-zoom" in cmd
+    assert cmd[cmd.index("--min-zoom") + 1] == "0"
+    assert "--max-zoom" not in cmd
+
+
+def test_build_raster_tile_command_auto_max_with_custom_min_zoom():
+    if GDAL_BIN is None:
+        pytest.skip("gdal CLI not installed")
+
+    cmd = build_raster_tile_command(
+        Path("/data/input.tif"),
+        Path("/data/output"),
+        TilingOptions(profile=TileProfile.MERCATOR, end_zoom=10),
+    )
+    assert cmd[cmd.index("--min-zoom") + 1] == "10"
     assert "--max-zoom" not in cmd
 
 
@@ -77,6 +91,20 @@ def test_build_raster_tile_command_geodetic_and_resampling_map():
     assert cmd[cmd.index("--tiling-scheme") + 1] == "WorldCRS84Quad"
     assert cmd[cmd.index("-r") + 1] == "nearest"
     assert "--resume" in cmd
+    assert "-q" not in cmd
+
+
+def test_build_raster_tile_command_show_progress():
+    if GDAL_BIN is None:
+        pytest.skip("gdal CLI not installed")
+
+    cmd = build_raster_tile_command(
+        Path("/data/input.tif"),
+        Path("/data/output"),
+        TilingOptions(),
+        show_progress=True,
+    )
+    assert "--progress" in cmd
     assert "-q" not in cmd
 
 

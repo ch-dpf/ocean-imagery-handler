@@ -1,127 +1,246 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <title>Ocean Imagery Preview</title>
+  <title>正射影像切片发布服务</title>
   <script src="https://cesium.com/downloads/cesiumjs/releases/1.120/Build/Cesium/Cesium.js"></script>
   <link href="https://cesium.com/downloads/cesiumjs/releases/1.120/Build/Cesium/Widgets/widgets.css" rel="stylesheet" />
+  <link href="/preview/styles.css" rel="stylesheet" />
   <style>
-    html, body, #cesiumContainer { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; }
-    #info {
-      position: absolute; top: 10px; left: 10px; z-index: 1000;
-      background: rgba(42, 42, 42, 0.85); color: #fff; padding: 8px 12px;
-      font-family: sans-serif; font-size: 13px; border-radius: 4px;
-    }
+    html, body { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; }
+    #pageHeader { position: fixed; top: 0; left: 0; right: 0; z-index: 1100; height: 48px; display: flex; align-items: center; justify-content: center; background: rgba(32,32,32,0.92); border-bottom: 1px solid rgba(255,255,255,0.1); color: #fff; font-family: sans-serif; }
+    #pageTitle { margin: 0; font-size: 15px; font-weight: 600; }
+    #appShell { position: fixed; top: 48px; left: 0; right: 0; bottom: 0; display: flex; }
+    #sideNav { width: 132px; flex-shrink: 0; background: rgba(32,32,32,0.94); border-right: 1px solid rgba(255,255,255,0.1); }
+    #mapArea { flex: 1; position: relative; overflow: hidden; }
+    #cesiumContainer { width: 100%; height: 100%; }
+    #info { position: absolute; left: 10px; bottom: 28px; z-index: 1000; background: rgba(42,42,42,0.85); color: #fff; padding: 8px 12px; border-radius: 4px; font-size: 13px; }
+    .panel-overlay, .popup-panel { display: none; }
   </style>
 </head>
 <body>
-  <div id="info">Add ?tileset={name} to the URL</div>
-  <div id="cesiumContainer"></div>
-  <script>
-    if (typeof Cesium.Ion !== "undefined") {
-      Cesium.Ion.defaultAccessToken = undefined;
-    }
+  <header id="pageHeader">
+    <h1 id="pageTitle">正射影像切片发布服务</h1>
+  </header>
 
-    (async function () {
-      const params = new URLSearchParams(window.location.search);
-      const tileset = params.get("tileset");
-      const info = document.getElementById("info");
+  <div id="appShell">
+    <nav id="sideNav" aria-label="主导航">
+      <ul class="side-nav-menu">
+        <li><button type="button" class="side-nav-item" data-panel="ingest">数据接入</button></li>
+        <li><button type="button" class="side-nav-item" data-panel="progress">进度查询</button></li>
+        <li><button type="button" class="side-nav-item" data-panel="publish">瓦片发布</button></li>
+        <li><button type="button" class="side-nav-item" data-panel="layers">图层管理</button></li>
+      </ul>
+    </nav>
 
-      // Same basemap as ocean-terrain-handler preview (ArcGIS World Imagery).
-      // Cesium 1.107+ requires fromUrl(); older sync constructor leaves _resource undefined.
-      let baseProvider;
-      if (Cesium.ArcGisMapServerImageryProvider.fromUrl) {
-        baseProvider = await Cesium.ArcGisMapServerImageryProvider.fromUrl(
-          "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer",
-        );
-      } else {
-        baseProvider = new Cesium.UrlTemplateImageryProvider({
-          url: "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-          maximumLevel: 19,
-        });
-      }
+    <main id="mapArea">
+      <div id="cesiumContainer"></div>
+      <div id="panelOverlay" class="panel-overlay"></div>
 
-      const viewer = new Cesium.Viewer("cesiumContainer", {
-        baseLayer: new Cesium.ImageryLayer(baseProvider),
-        terrainProvider: new Cesium.EllipsoidTerrainProvider(),
-        animation: false,
-        timeline: false,
-        baseLayerPicker: false,
-        geocoder: false,
-        homeButton: false,
-        sceneModePicker: false,
-        navigationHelpButton: false,
-      });
-      viewer.scene.globe.enableLighting = false;
+      <aside id="ingestPanel" class="popup-panel" aria-label="数据接入">
+        <div class="panel-header">
+          <h2>数据接入</h2>
+          <button type="button" class="panel-close" aria-label="关闭">×</button>
+        </div>
+        <div class="panel-body">
+          <div class="panel-subtabs">
+            <button type="button" class="panel-subtab active" data-submit-tab="upload">本地上传</button>
+            <button type="button" class="panel-subtab" data-submit-tab="workspace">服务器文件</button>
+          </div>
+          <div id="uploadTabPanel" class="tab-panel active">
+            <div class="form-row">
+              <label for="uploadFile">GeoTIFF 文件 (.tif / .tiff / .img)</label>
+              <input type="file" id="uploadFile" accept=".tif,.tiff,.img" />
+            </div>
+            <div class="panel-actions">
+              <button type="button" id="uploadSubmitBtn">上传并开始处理</button>
+            </div>
+          </div>
+          <div id="workspaceTabPanel" class="tab-panel">
+            <div id="workspacePath" class="workspace-path"></div>
+            <div id="workspaceBreadcrumb" class="workspace-breadcrumb"></div>
+            <ul id="workspaceList" class="workspace-list">
+              <li class="empty-hint">切换到本标签后自动加载</li>
+            </ul>
+            <div class="panel-actions">
+              <button type="button" id="workspaceSubmitBtn" disabled>提交选中文件</button>
+            </div>
+          </div>
 
-      if (!tileset) {
-        info.textContent = "Missing ?tileset={name} query parameter";
-        return;
-      }
+          <details class="advanced-options" id="advancedOptions">
+            <summary>高级选项</summary>
+            <div class="options-section">
+              <h3>预处理</h3>
+              <div class="form-row">
+                <label for="optTargetCrs">目标坐标系</label>
+                <input type="text" id="optTargetCrs" value="EPSG:3857" />
+              </div>
+              <div class="form-row">
+                <label for="optCompress">压缩方式</label>
+                <select id="optCompress">
+                  <option value="DEFLATE" selected>DEFLATE</option>
+                  <option value="LZW">LZW</option>
+                  <option value="JPEG">JPEG</option>
+                </select>
+              </div>
+              <div class="form-row form-checks">
+                <label><input type="checkbox" id="optBuildOverviews" checked /> 构建概览图</label>
+                <label><input type="checkbox" id="optAddAlpha" checked /> 添加 Alpha 透明通道</label>
+                <label><input type="checkbox" id="optWhiteTransparent" /> 白色视为透明</label>
+              </div>
+            </div>
+            <div class="options-section">
+              <h3>切片</h3>
+              <div class="form-grid">
+                <div class="form-row">
+                  <label for="optTileScheme">瓦片索引</label>
+                  <select id="optTileScheme">
+                    <option value="xyz" selected>XYZ（Cesium 推荐）</option>
+                    <option value="tms">TMS</option>
+                  </select>
+                </div>
+                <div class="form-row">
+                  <label for="optProfile">切片 profile</label>
+                  <select id="optProfile">
+                    <option value="mercator" selected>mercator (Web Mercator)</option>
+                    <option value="geodetic">geodetic (WGS84)</option>
+                    <option value="raster">raster</option>
+                  </select>
+                </div>
+                <div class="form-row">
+                  <label for="optTileFormat">瓦片格式</label>
+                  <select id="optTileFormat">
+                    <option value="PNG" selected>PNG</option>
+                    <option value="JPEG">JPEG</option>
+                    <option value="WEBP">WEBP</option>
+                  </select>
+                </div>
+                <div class="form-row">
+                  <label for="optResampling">重采样</label>
+                  <select id="optResampling">
+                    <option value="bilinear" selected>bilinear</option>
+                    <option value="near">near</option>
+                    <option value="cubic">cubic</option>
+                    <option value="lanczos">lanczos</option>
+                    <option value="average">average</option>
+                  </select>
+                </div>
+                <div class="form-row">
+                  <label for="optStartZoom">最大 zoom（留空自动）</label>
+                  <input type="number" id="optStartZoom" min="0" placeholder="自动" />
+                </div>
+                <div class="form-row">
+                  <label for="optEndZoom">最小 zoom</label>
+                  <input type="number" id="optEndZoom" min="0" value="0" />
+                </div>
+                <div class="form-row">
+                  <label for="optThreadCount">并行线程（留空默认）</label>
+                  <input type="number" id="optThreadCount" min="1" placeholder="默认" />
+                </div>
+              </div>
+              <div class="form-row form-checks">
+                <label><input type="checkbox" id="optResume" /> 断点续切</label>
+              </div>
+            </div>
+            <div class="options-section">
+              <h3>发布</h3>
+              <div class="form-row">
+                <label for="optTilesetName">Tileset 名称（可选）</label>
+                <input type="text" id="optTilesetName" placeholder="留空则使用 job_id" />
+              </div>
+              <div class="form-row form-checks">
+                <label><input type="checkbox" id="optAutoPublish" checked /> 完成后自动发布</label>
+              </div>
+            </div>
+          </details>
 
-      function parseBounds(bounds) {
-        if (!Array.isArray(bounds) || bounds.length !== 4) return null;
-        const [west, south, east, north] = bounds.map(Number);
-        if ([west, south, east, north].some((v) => Number.isNaN(v))) return null;
-        if (west < -180 || east > 180 || south < -90 || north > 90) return null;
-        if (west >= east || south >= north) return null;
-        return { west, south, east, north };
-      }
+          <div id="submitStatus"></div>
+        </div>
+      </aside>
 
-      const metadataUrl = `/imagery/${tileset}/tile.json`;
-      try {
-        const response = await fetch(metadataUrl);
-        if (!response.ok) throw new Error("HTTP " + response.status);
-        const meta = await response.json();
-        let urlTemplate = (meta.tiles && meta.tiles[0]) || `/imagery/${tileset}/{z}/{x}/{y}.png`;
-        if (meta.scheme === "tms") {
-          urlTemplate = urlTemplate.replace("{y}", "{reverseY}");
-        }
-        try {
-          const templateUrl = new URL(urlTemplate, window.location.origin);
-          urlTemplate = templateUrl.pathname + templateUrl.search;
-        } catch (_) {
-          // Keep relative templates as-is.
-        }
-        const bounds = parseBounds(meta.bounds);
-        const minLevel = meta.minzoom ?? 0;
-        const maxLevel = meta.maxzoom ?? 18;
-        const scheme = new Cesium.WebMercatorTilingScheme();
+      <aside id="layersPanel" class="popup-panel" aria-label="图层管理">
+        <div class="panel-header">
+          <h2>已发布图层</h2>
+          <button type="button" class="panel-close" aria-label="关闭">×</button>
+        </div>
+        <div class="panel-body">
+          <div class="panel-actions">
+            <button type="button" id="refreshTilesetsBtn">刷新列表</button>
+          </div>
+          <ul id="tilesetList" class="tileset-list">
+            <li class="empty-hint">打开面板后自动加载</li>
+          </ul>
+        </div>
+      </aside>
 
-        const providerOptions = {
-          url: urlTemplate,
-          tilingScheme: scheme,
-          minimumLevel: minLevel,
-          maximumLevel: maxLevel,
-        };
-        if (bounds) {
-          providerOptions.rectangle = Cesium.Rectangle.fromDegrees(
-            bounds.west,
-            bounds.south,
-            bounds.east,
-            bounds.north,
-          );
-        }
+      <aside id="progressPanel" class="popup-panel" aria-label="进度查询">
+        <div class="panel-header">
+          <h2>进度查询</h2>
+          <button type="button" class="panel-close" aria-label="关闭">×</button>
+        </div>
+        <div class="panel-body">
+          <div class="form-row">
+            <label for="jobIdInput">任务 ID</label>
+            <input type="text" id="jobIdInput" placeholder="输入 job_id" />
+          </div>
+          <div class="panel-actions">
+            <button type="button" id="lookupJobBtn">查询 / 轮询</button>
+            <button type="button" class="secondary" id="openJobTilesetBtn" disabled>在地图中打开</button>
+          </div>
+          <div id="jobProgress" class="job-progress" hidden>
+            <div class="job-progress-meta">
+              <span id="jobProgressLabel">进度</span>
+              <span id="jobProgressPercent">0%</span>
+            </div>
+            <div
+              class="job-progress-track"
+              role="progressbar"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow="0"
+              id="jobProgressBar"
+            >
+              <div class="job-progress-fill" id="jobProgressFill"></div>
+            </div>
+            <p class="job-progress-message" id="jobProgressMessage"></p>
+          </div>
+          <dl id="jobDetail" class="job-detail">
+            <dt>说明</dt>
+            <dd>在「数据接入」提交任务后，在此查看进度；发布完成后可一键预览。</dd>
+          </dl>
+        </div>
+      </aside>
 
-        const provider = new Cesium.UrlTemplateImageryProvider(providerOptions);
+      <aside id="publishPanel" class="popup-panel" aria-label="瓦片发布">
+        <div class="panel-header">
+          <h2>瓦片发布</h2>
+          <button type="button" class="panel-close" aria-label="关闭">×</button>
+        </div>
+        <div class="panel-body">
+          <div class="form-row">
+            <label for="publishJobIdInput">任务 ID</label>
+            <input type="text" id="publishJobIdInput" placeholder="已完成的 job_id" />
+          </div>
+          <div class="form-row">
+            <label for="tilesetNameInput">Tileset 名称（可选）</label>
+            <input type="text" id="tilesetNameInput" placeholder="留空则使用 job_id" />
+          </div>
+          <div class="panel-actions">
+            <button type="button" id="publishJobBtn">发布</button>
+            <button type="button" class="secondary" id="unpublishJobBtn">下架</button>
+          </div>
+          <div id="publishStatus"></div>
+        </div>
+      </aside>
 
-        viewer.imageryLayers.addImageryProvider(provider);
-        info.textContent = "Loaded tileset: " + tileset;
+      <div id="info">
+        <div id="status">Loading preview…</div>
+        <div id="coords">经度: —　纬度: —　层级: —</div>
+      </div>
+    </main>
+  </div>
 
-        if (bounds) {
-          viewer.camera.flyTo({
-            destination: Cesium.Rectangle.fromDegrees(
-              bounds.west,
-              bounds.south,
-              bounds.east,
-              bounds.north,
-            ),
-          });
-        }
-      } catch (err) {
-        info.textContent = "Failed to load " + metadataUrl + ": " + err.message;
-      }
-    })();
-  </script>
+  <div id="toastContainer" class="toast-container"></div>
+  <script src="/preview/app.js"></script>
 </body>
 </html>

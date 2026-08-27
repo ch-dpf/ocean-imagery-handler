@@ -47,9 +47,9 @@ class TileScheme(str, Enum):
 class PreprocessOptions(BaseModel):
     target_crs: str = Field(
         default="EPSG:3857",
-        description="Target CRS for gdalwarp (EPSG:3857 recommended for Cesium Web Mercator)",
+        description="Target CRS for gdal raster reproject (EPSG:3857 recommended for Cesium Web Mercator)",
     )
-    build_overviews: bool = Field(default=True, description="Build overviews with gdaladdo")
+    build_overviews: bool = Field(default=True, description="Build overviews with gdal raster overview add")
     block_size: int = Field(
         default=256,
         ge=16,
@@ -63,7 +63,7 @@ class PreprocessOptions(BaseModel):
     )
     white_as_transparent: bool = Field(
         default=False,
-        description="Treat exact white RGB(255,255,255) fill as transparent during gdalwarp",
+        description="Treat exact white RGB(255,255,255) fill as transparent during gdal raster reproject",
     )
     near_white: int = Field(
         default=0,
@@ -147,9 +147,27 @@ class ImageryJobResponse(BaseModel):
     message: str | None = None
 
 
+class JobProgress(BaseModel):
+    percent: float = Field(ge=0, le=100, description="Overall job completion 0-100")
+    phase: str | None = Field(default=None, description="Current pipeline stage identifier")
+    message: str | None = Field(default=None, description="Human-readable progress detail")
+    current_zoom: int | None = Field(default=None, description="Zoom level currently being generated")
+    min_zoom: int | None = Field(default=None, description="Minimum output zoom level")
+    max_zoom: int | None = Field(default=None, description="Maximum output zoom level")
+    weight_source: str | None = Field(
+        default=None,
+        description="Stage weight source: default (fixed) or historical (calibrated from past jobs)",
+    )
+    calibration_samples: int | None = Field(
+        default=None,
+        description="Number of completed jobs used for historical calibration, if applicable",
+    )
+
+
 class ImageryJobDetail(BaseModel):
     job_id: str
     status: JobStatus
+    progress: JobProgress | None = None
     stage: str | None = None
     input_path: str | None = None
     output_dir: str | None = None
@@ -165,7 +183,33 @@ class TilesetInfo(BaseModel):
     name: str
     imagery_url: str
     url_template: str | None = None
+    scheme: str | None = Field(default=None, description="Tile index scheme: xyz or tms")
+    scheme_label: str | None = Field(default=None, description="Human-readable scheme label")
+    min_zoom: int | None = None
+    max_zoom: int | None = None
+    profile: str | None = Field(default=None, description="Tiling profile from tile.json")
+    crs: str | None = Field(default=None, description="Tile coordinate system label")
+    bounds: list[float] | None = Field(
+        default=None,
+        description="WGS84 bounds [west, south, east, north]",
+    )
 
 
 class TilesetListResponse(BaseModel):
     tilesets: list[TilesetInfo]
+
+
+class WorkspaceEntryInfo(BaseModel):
+    name: str
+    relative_path: str
+    absolute_path: str
+    entry_type: str
+    size_bytes: int | None = None
+    selectable: bool
+
+
+class WorkspaceListResponse(BaseModel):
+    relative_path: str
+    absolute_path: str
+    parent_relative_path: str | None = None
+    entries: list[WorkspaceEntryInfo]

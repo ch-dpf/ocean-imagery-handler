@@ -9,8 +9,10 @@ from app.schemas import TileFormat, TileProfile, TileScheme
 from app.services.tile_json import (
     TileJsonError,
     build_tile_json,
+    crs_label_for_profile,
     ensure_tile_json,
     scan_tile_extents,
+    scheme_label,
 )
 
 
@@ -46,6 +48,7 @@ def test_build_tile_json_mercator(tmp_path: Path):
     )
     assert meta["tilejson"] == "3.0.0"
     assert meta["scheme"] == "xyz"
+    assert meta["profile"] == "mercator"
     assert meta["minzoom"] == 0
     assert meta["maxzoom"] == 0
     assert meta["bounds"] == bounds
@@ -108,3 +111,11 @@ def test_ensure_tile_json_writes_file(tmp_path: Path):
     data = json.loads(meta_path.read_text(encoding="utf-8"))
     assert data["maxzoom"] == 0
     assert data["tilejson"] == "3.0.0"
+
+
+def test_crs_and_scheme_labels():
+    assert scheme_label("xyz") == "XYZ"
+    assert scheme_label("tms") == "TMS"
+    assert crs_label_for_profile("mercator") == "EPSG:3857 (Web Mercator)"
+    assert crs_label_for_profile(None) == "EPSG:3857 (Web Mercator)"
+    assert crs_label_for_profile("geodetic") == "EPSG:4326 (WGS84 / Geodetic)"

@@ -9,7 +9,7 @@ from pathlib import Path
 
 def wgs84_bounds(dataset: Path) -> list[float]:
     result = subprocess.run(
-        ["gdalinfo", "-json", str(dataset)],
+        ["gdal", "raster", "info", "--format", "JSON", str(dataset)],
         capture_output=True,
         text=True,
         check=False,

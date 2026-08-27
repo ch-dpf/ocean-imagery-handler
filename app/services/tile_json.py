@@ -103,20 +103,40 @@ def build_tile_json(
 
     west, south, east, north = [float(v) for v in bounds_wgs84]
     center_zoom = (min_zoom + max_zoom) // 2
-
-    # profile is retained for API symmetry; TileJSON assumes Web Mercator XYZ/TMS.
-    _ = profile, tile_format
+    _ = tile_format
 
     return {
         "tilejson": TILEJSON_VERSION,
         "name": tileset_name,
         "scheme": tile_scheme.value,
+        "profile": profile.value,
         "tiles": [tile_url],
         "minzoom": min_zoom,
         "maxzoom": max_zoom,
         "bounds": [west, south, east, north],
         "center": [(west + east) / 2.0, (south + north) / 2.0, center_zoom],
     }
+
+
+PROFILE_CRS_LABELS: dict[str, str] = {
+    TileProfile.MERCATOR.value: "EPSG:3857 (Web Mercator)",
+    TileProfile.GEODETIC.value: "EPSG:4326 (WGS84 / Geodetic)",
+    TileProfile.RASTER.value: "本地像素 (Raster)",
+}
+
+
+def crs_label_for_profile(profile: str | None) -> str:
+    if not profile:
+        return PROFILE_CRS_LABELS[TileProfile.MERCATOR.value]
+    return PROFILE_CRS_LABELS.get(profile, PROFILE_CRS_LABELS[TileProfile.MERCATOR.value])
+
+
+def scheme_label(scheme: str | None) -> str:
+    if scheme == TileScheme.TMS.value:
+        return "TMS"
+    if scheme == TileScheme.XYZ.value:
+        return "XYZ"
+    return scheme.upper() if scheme else "—"
 
 
 def ensure_tile_json(

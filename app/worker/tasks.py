@@ -2,11 +2,19 @@
 
 import logging
 import shutil
+import time
 from pathlib import Path
 from uuid import uuid4
 
 from app.config import get_settings
-from app.schemas import ImageryJobCreate, JobStatus
+from app.schemas import ImageryJobCreate, JobProgress, JobStatus
+from app.services.job_progress import (
+    JobProgressTracker,
+    ThrottledProgressWriter,
+    parse_zoom_level,
+    progress_to_store_fields,
+)
+from app.services.progress_calibration import ProgressCalibrationStore
 from app.services.tile_json import TileJsonError, _bounds_valid_wgs84
 from app.services.job_store import JobStore
 from app.services.preprocessor import PreprocessError, parse_wgs84_bounds, preprocess_imagery
@@ -21,6 +29,88 @@ def _store() -> JobStore:
     return JobStore(get_settings())
 
 
+class _JobProgressReporter:
+    def __init__(self, job_id: str, *, auto_publish: bool) -> None:
+        self._job_id = job_id
+        self._auto_publish = auto_publish
+        self._store = _store()
+        settings = get_settings()
+        calibration = ProgressCalibrationStore(settings, self._store.redis)
+        stage_ranges, weight_source, calibration_samples = calibration.get_stage_ranges(
+            auto_publish=auto_publish,
+        )
+        self._calibration = calibration
+        self.tracker = JobProgressTracker(
+            stage_ranges=stage_ranges,
+            weight_source=weight_source,
+            calibration_samples=calibration_samples,
+        )
+        self._writer = ThrottledProgressWriter(self._persist)
+        self._current_stage: str | None = None
+        self._stage_started_at: float | None = None
+        self._stage_durations: dict[str, float] = {}
+
+    def _persist(self, progress: JobProgress) -> None:
+        self._store.update(self._job_id, **progress_to_store_fields(progress))
+
+    def _close_current_stage(self) -> None:
+        if self._current_stage is None or self._stage_started_at is None:
+            return
+        elapsed = time.monotonic() - self._stage_started_at
+        self._stage_durations[self._current_stage] = elapsed
+
+    def begin_stage(
+        self,
+        stage: str,
+        *,
+        status: JobStatus,
+        message: str | None = None,
+        min_zoom: int | None = None,
+        max_zoom: int | None = None,
+    ) -> None:
+        self._close_current_stage()
+        self._current_stage = stage
+        self._stage_started_at = time.monotonic()
+
+        progress = self.tracker.set_stage(
+            stage,
+            message=message,
+            sub_percent=0.0,
+            min_zoom=min_zoom,
+            max_zoom=max_zoom,
+        )
+        self._store.update(
+            self._job_id,
+            status=status.value,
+            stage=stage,
+            **progress_to_store_fields(progress),
+        )
+        self._writer.emit(progress, force=True)
+
+    def update_subprogress(
+        self,
+        sub_percent: float,
+        *,
+        message: str | None = None,
+        current_zoom: int | None = None,
+    ) -> None:
+        progress = self.tracker.update_subprogress(
+            sub_percent,
+            message=message,
+            current_zoom=current_zoom,
+        )
+        self._writer.emit(progress)
+
+    def complete(self, *, message: str = "Done") -> None:
+        self._close_current_stage()
+        self._calibration.record_job_durations(
+            self._stage_durations,
+            auto_publish=self._auto_publish,
+        )
+        progress = self.tracker.set_stage("done", message=message, sub_percent=100.0)
+        self._writer.emit(progress, force=True)
+
+
 def _should_auto_publish(request: ImageryJobCreate, settings) -> bool:
     if request.publish.auto_publish is not None:
         return request.publish.auto_publish
@@ -33,9 +123,17 @@ def _publish_job_tileset(
     request: ImageryJobCreate,
     settings,
     bounds_wgs84: list[float],
+    reporter: _JobProgressReporter | None = None,
 ) -> tuple[str, str, str]:
     store = _store()
-    store.update(job_id, status=JobStatus.PUBLISHING.value, stage="register_tileset")
+    if reporter is not None:
+        reporter.begin_stage(
+            "register_tileset",
+            status=JobStatus.PUBLISHING,
+            message="Registering tileset",
+        )
+    else:
+        store.update(job_id, status=JobStatus.PUBLISHING.value, stage="register_tileset")
 
     imagery_url, tileset_name, url_template = publish_tileset(
         job_id=job_id,
@@ -61,9 +159,15 @@ def process_imagery_job(self, job_id: str, request_data: dict) -> dict:
     job_dir = settings.jobs_dir / job_id
     preprocess_dir = job_dir / "preprocess"
     output_dir = job_dir / "tiles"
+    auto_publish = _should_auto_publish(request, settings)
+    reporter = _JobProgressReporter(job_id, auto_publish=auto_publish)
 
     try:
-        store.update(job_id, status=JobStatus.RUNNING.value, stage="initializing")
+        reporter.begin_stage(
+            "initializing",
+            status=JobStatus.RUNNING,
+            message="Initializing job",
+        )
 
         if not request.input_path:
             raise ValueError("input_path is required for background processing")
@@ -72,23 +176,47 @@ def process_imagery_job(self, job_id: str, request_data: dict) -> dict:
         if not input_path.is_file():
             raise FileNotFoundError(f"Input file not found: {input_path}")
 
-        store.update(job_id, status=JobStatus.PREPROCESSING.value, stage="gdal_preprocess")
+        reporter.begin_stage(
+            "gdal_preprocess",
+            status=JobStatus.PREPROCESSING,
+            message="Running GDAL preprocess",
+        )
         preprocessed = preprocess_imagery(
             input_path=input_path,
             work_dir=preprocess_dir,
             options=request.preprocess,
             gdal_cachemax=settings.gdal_cachemax,
+            on_subprogress=lambda pct, msg: reporter.update_subprogress(pct, message=msg),
         )
 
         bounds_wgs84 = parse_wgs84_bounds(preprocessed, env={"GDAL_CACHEMAX": str(settings.gdal_cachemax)})
         store.update(job_id, bounds_wgs84=bounds_wgs84)
 
-        store.update(job_id, status=JobStatus.TILING.value, stage="gdal_raster_tile")
+        tiling = request.tiling_options
+        min_zoom = tiling.end_zoom
+        max_zoom = tiling.start_zoom
+        reporter.begin_stage(
+            "gdal_raster_tile",
+            status=JobStatus.TILING,
+            message="Generating tiles",
+            min_zoom=min_zoom,
+            max_zoom=max_zoom,
+        )
+
+        def _tile_progress(sub_percent: float, message: str | None) -> None:
+            current_zoom = parse_zoom_level(message) if message else None
+            reporter.update_subprogress(
+                sub_percent,
+                message=message or "Generating tiles",
+                current_zoom=current_zoom,
+            )
+
         run_raster_tile(
             input_path=preprocessed,
             output_dir=output_dir,
-            options=request.tiling_options,
+            options=tiling,
             gdal_cachemax=settings.gdal_cachemax,
+            on_subprogress=_tile_progress,
         )
 
         result: dict[str, str | bool | list[float]] = {
@@ -99,9 +227,9 @@ def process_imagery_job(self, job_id: str, request_data: dict) -> dict:
             "published": False,
         }
 
-        if _should_auto_publish(request, settings):
+        if auto_publish:
             imagery_url, tileset_name, url_template = _publish_job_tileset(
-                job_id, output_dir, request, settings, bounds_wgs84
+                job_id, output_dir, request, settings, bounds_wgs84, reporter=reporter
             )
             store.update(
                 job_id,
@@ -114,6 +242,7 @@ def process_imagery_job(self, job_id: str, request_data: dict) -> dict:
                 published=True,
                 error=None,
             )
+            reporter.complete(message="Completed and published")
             result.update(
                 {
                     "imagery_url": imagery_url,
@@ -131,6 +260,7 @@ def process_imagery_job(self, job_id: str, request_data: dict) -> dict:
                 published=False,
                 error=None,
             )
+            reporter.complete(message="Completed")
 
         return result
 
@@ -143,11 +273,16 @@ def process_imagery_job(self, job_id: str, request_data: dict) -> dict:
         ValueError,
     ) as exc:
         logger.exception("Job %s failed", job_id)
+        reporter._close_current_stage()
+        failed_progress = reporter.tracker.snapshot()
+        failed_progress.message = str(exc)
+        failed_progress.phase = "failed"
         store.update(
             job_id,
             status=JobStatus.FAILED.value,
             stage="failed",
             error=str(exc),
+            **progress_to_store_fields(failed_progress),
         )
         raise
 

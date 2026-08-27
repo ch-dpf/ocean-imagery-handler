@@ -8,7 +8,7 @@
 
 ```
 客户端 → FastAPI → Redis 队列 → Celery Worker
-                                    ├─ GDAL 预处理 (gdalwarp / gdaladdo)
+                                    ├─ GDAL 预处理 (gdal raster reproject / overview add)
                                     ├─ gdal raster tile → PNG/JPEG 瓦片
                                     └─ 注册 tileset → nginx 发布
 
@@ -26,9 +26,9 @@ Cesium 客户端 → imagery-server :8102/imagery/{name}/{z}/{x}/{y}.png
 
 ## 处理流程
 
-1. **校验** — `gdalinfo` 检查输入栅格
-2. **投影** — `gdalwarp` 转为 EPSG:3857（Web Mercator，Cesium 推荐）
-3. **概览图** — `gdaladdo` 加速大文件切片
+1. **校验** — `gdal raster info` 检查输入栅格
+2. **投影** — `gdal raster reproject` 转为 EPSG:3857（Web Mercator，Cesium 推荐）
+3. **概览图** — `gdal raster overview add` 加速大文件切片
 4. **切片** — `gdal raster tile` 生成 `{z}/{x}/{y}.png`
 5. **元数据** — 生成标准 `tile.json`（TileJSON 3.0：bounds、zoom、tiles URL）
 6. **发布** — 注册到 `data/tilesets/imagery/{name}`，由 Nginx 对外服务
@@ -51,9 +51,22 @@ docker compose up -d --build
 服务地址：`http://localhost:8100`  
 API 文档：`http://localhost:8100/docs`  
 影像发布：`http://localhost:8102/imagery/{tileset_name}/{z}/{x}/{y}.png`  
-影像预览：`http://localhost:8102/preview/?tileset={tileset_name}`
+影像预览：`http://localhost:8102/preview/?tileset={tileset_name}`  
+预览页也支持 `?job={job_id}` 自动打开进度查询面板并轮询状态。
 
-### 提交任务
+### 浏览器预览页
+
+访问 `http://localhost:8102/preview/` 可使用内置 Cesium 预览与后台 API 集成：
+
+| 菜单 | 功能 |
+|------|------|
+| **数据接入** | **本地上传** / **服务器文件**；可展开 **高级选项** 配置预处理、切片、发布参数 |
+| **进度查询** | 按 `job_id` 查询状态、轮询进度，完成后可一键预览 |
+| **瓦片发布** | 按 `job_id` 发布 / 下架 tileset |
+| **图层管理** | 列出已发布 tileset 并切换加载 |
+
+预览页通过 Nginx 同源代理 `/api/` 访问 FastAPI，无需额外 CORS 配置。
+
 
 将正射 TIF 放入 `./data/` 后：
 
@@ -208,7 +221,7 @@ ocean-imagery-handler/
 │       └── tasks.py
 ├── docker/
 │   └── nginx.conf
-├── scripts/preview/             # Cesium 预览页
+├── scripts/preview/             # Cesium 预览页 (index.html, app.js, styles.css)
 ├── tests/
 ├── docker-compose.yml
 └── requirements.txt
