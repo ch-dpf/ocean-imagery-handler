@@ -29,6 +29,7 @@ def test_build_reproject_command_basic():
     assert "--overwrite" in cmd
     assert "--co" in cmd
     assert "TILED=YES" in cmd
+    assert "BIGTIFF=IF_SAFER" in cmd
     assert "--add-alpha" in cmd
     assert cmd[-2:] == [str(Path("/data/in.tif")), str(Path("/data/warped.tif"))]
 

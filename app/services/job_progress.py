@@ -182,6 +182,12 @@ def gdal_progress_flag_unsupported(stderr: str) -> bool:
     )
 
 
+# GDAL --progress often emits "0...10...20..." without newlines until completion.
+# read()-until-EOF would hide mid-run updates; small binary chunks keep parsing live.
+_STREAM_CHUNK_SIZE = 256
+_PARSE_WINDOW = 512
+
+
 def run_gdal_command(
     cmd: list[str],
     *,
@@ -193,52 +199,49 @@ def run_gdal_command(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
+        text=False,
         env=env,
-        bufsize=1,
+        bufsize=0,
     )
     assert process.stderr is not None
     assert process.stdout is not None
 
-    stderr_lines: list[str] = []
-    stdout_lines: list[str] = []
+    stderr_chunks: list[str] = []
+    stdout_chunks: list[str] = []
     sub_percent = 0.0
-    stderr_buffer = ""
     lock = threading.Lock()
 
-    def _consume_stderr() -> None:
-        nonlocal sub_percent, stderr_buffer
-        for chunk in iter(process.stderr.read, ""):
-            if not chunk:
+    def _consume_stream(stream: Any, collected: list[str]) -> None:
+        nonlocal sub_percent
+        parse_buffer = ""
+        while True:
+            raw = stream.read(_STREAM_CHUNK_SIZE)
+            if not raw:
                 break
+            text = raw.decode("utf-8", errors="replace")
+            message: str | None = None
             with lock:
-                stderr_lines.append(chunk)
-                stderr_buffer += chunk
-                sub_percent = parse_gdal_progress_chunk(stderr_buffer, sub_percent)
-                stderr_buffer = stderr_buffer[-512:]
-                message = chunk.strip() or None
-                zoom = parse_zoom_level(chunk)
+                collected.append(text)
+                parse_buffer = (parse_buffer + text)[-_PARSE_WINDOW:]
+                sub_percent = parse_gdal_progress_chunk(parse_buffer, sub_percent)
+                message = text.strip() or None
+                zoom = parse_zoom_level(text)
                 if zoom is not None and message is None:
                     message = f"Zoom {zoom}"
+                percent_snapshot = sub_percent
             if on_subprogress is not None:
-                on_subprogress(sub_percent, message if message else None)
+                on_subprogress(percent_snapshot, message)
 
-    def _consume_stdout() -> None:
-        for chunk in iter(process.stdout.read, ""):
-            if not chunk:
-                break
-            with lock:
-                stdout_lines.append(chunk)
-                sub_percent = parse_gdal_progress_chunk(chunk, sub_percent)
-                message = chunk.strip() or None
-                zoom = parse_zoom_level(chunk)
-                if zoom is not None and message is None:
-                    message = f"Zoom {zoom}"
-            if on_subprogress is not None:
-                on_subprogress(sub_percent, message if message else None)
-
-    stderr_thread = threading.Thread(target=_consume_stderr, daemon=True)
-    stdout_thread = threading.Thread(target=_consume_stdout, daemon=True)
+    stderr_thread = threading.Thread(
+        target=_consume_stream,
+        args=(process.stderr, stderr_chunks),
+        daemon=True,
+    )
+    stdout_thread = threading.Thread(
+        target=_consume_stream,
+        args=(process.stdout, stdout_chunks),
+        daemon=True,
+    )
     stderr_thread.start()
     stdout_thread.start()
 
@@ -250,8 +253,8 @@ def run_gdal_command(
         on_subprogress(100.0, None)
 
     if return_code != 0:
-        stderr = "".join(stderr_lines)
-        stdout = "".join(stdout_lines)
+        stderr = "".join(stderr_chunks)
+        stdout = "".join(stdout_chunks)
         raise subprocess.CalledProcessError(
             return_code,
             cmd,

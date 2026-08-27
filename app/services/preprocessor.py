@@ -22,11 +22,14 @@ class PreprocessError(RuntimeError):
 
 
 def _creation_options(options: PreprocessOptions, compress: str) -> list[str]:
+    # IF_SAFER: use BigTIFF when the raster may exceed the classic ~4GB TIFF limit
+    # (common for provincial/high-zoom orthophotos during reproject + alpha).
     creation_options = [
         "TILED=YES",
         f"BLOCKXSIZE={options.block_size}",
         f"BLOCKYSIZE={options.block_size}",
         f"COMPRESS={compress}",
+        "BIGTIFF=IF_SAFER",
     ]
     if compress == "JPEG":
         creation_options.append(f"JPEG_QUALITY={options.jpeg_quality}")
