@@ -100,11 +100,11 @@
                   </select>
                 </div>
                 <div class="form-row">
-                  <label for="optProfile">切片 profile</label>
+                  <label for="optProfile">切片方案</label>
                   <select id="optProfile">
-                    <option value="mercator" selected>mercator (Web Mercator)</option>
-                    <option value="geodetic">geodetic (WGS84)</option>
-                    <option value="raster">raster</option>
+                    <option value="mercator" selected>墨卡托 (Web Mercator)</option>
+                    <option value="geodetic">大地坐标 (WGS84)</option>
+                    <option value="raster">栅格</option>
                   </select>
                 </div>
                 <div class="form-row">
@@ -118,11 +118,11 @@
                 <div class="form-row">
                   <label for="optResampling">重采样</label>
                   <select id="optResampling">
-                    <option value="bilinear" selected>bilinear</option>
-                    <option value="near">near</option>
-                    <option value="cubic">cubic</option>
-                    <option value="lanczos">lanczos</option>
-                    <option value="average">average</option>
+                    <option value="bilinear" selected>双线性</option>
+                    <option value="near">最邻近</option>
+                    <option value="cubic">三次卷积</option>
+                    <option value="lanczos">Lanczos</option>
+                    <option value="average">平均值</option>
                   </select>
                 </div>
                 <div class="form-row">
@@ -133,13 +133,6 @@
                   <label for="optEndZoom">最小 zoom</label>
                   <input type="number" id="optEndZoom" min="0" value="0" />
                 </div>
-                <div class="form-row">
-                  <label for="optThreadCount">并行线程（留空默认）</label>
-                  <input type="number" id="optThreadCount" min="1" placeholder="默认" />
-                </div>
-              </div>
-              <div class="form-row form-checks">
-                <label><input type="checkbox" id="optResume" /> 断点续切</label>
               </div>
             </div>
             <div class="options-section">
@@ -149,7 +142,7 @@
                 <input type="text" id="optTilesetName" placeholder="留空则使用 job_id" />
               </div>
               <div class="form-row form-checks">
-                <label><input type="checkbox" id="optAutoPublish" checked /> 完成后自动发布</label>
+                <label><input type="checkbox" id="optAutoPublish" /> 完成后自动发布</label>
               </div>
             </div>
           </details>
@@ -202,12 +195,18 @@
             >
               <div class="job-progress-fill" id="jobProgressFill"></div>
             </div>
-            <p class="job-progress-message" id="jobProgressMessage"></p>
+            <dl id="jobDetail" class="job-detail job-detail-compact">
+              <dt>状态</dt>
+              <dd id="jobStatusValue">—</dd>
+              <dt>阶段</dt>
+              <dd id="jobStageValue">—</dd>
+              <dt>耗时</dt>
+              <dd id="jobElapsedValue">—</dd>
+            </dl>
           </div>
-          <dl id="jobDetail" class="job-detail">
-            <dt>说明</dt>
-            <dd>在「数据接入」提交任务后，在此查看进度；发布完成后可一键预览。</dd>
-          </dl>
+          <p id="jobQueryHint" class="empty-hint">
+            在「数据接入」提交任务后，在此查看进度；完成后可一键在地图中打开。
+          </p>
         </div>
       </aside>
 

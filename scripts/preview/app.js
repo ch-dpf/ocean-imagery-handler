@@ -326,29 +326,68 @@
       done: "完成",
       failed: "失败",
     };
-    return labels[phase] || phase || "进度";
+    return labels[phase] || phase || "—";
+  }
+
+  function statusLabel(status) {
+    const labels = {
+      queued: "排队中",
+      running: "运行中",
+      preprocessing: "预处理中",
+      tiling: "切片中",
+      publishing: "发布中",
+      completed: "已完成",
+      failed: "失败",
+    };
+    return labels[status] || status || "—";
+  }
+
+  function formatElapsed(seconds) {
+    if (seconds == null || Number.isNaN(Number(seconds))) return "—";
+    const total = Math.max(0, Math.floor(Number(seconds)));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const secs = total % 60;
+    if (hours > 0) {
+      return hours + "小时 " + minutes + "分 " + secs + "秒";
+    }
+    if (minutes > 0) {
+      return minutes + "分 " + secs + "秒";
+    }
+    return secs + "秒";
   }
 
   function clearJobProgress() {
     const progressEl = document.getElementById("jobProgress");
     const fillEl = document.getElementById("jobProgressFill");
     const barEl = document.getElementById("jobProgressBar");
+    const hintEl = document.getElementById("jobQueryHint");
     progressEl.hidden = true;
     fillEl.style.width = "0%";
     fillEl.className = "job-progress-fill";
     barEl.setAttribute("aria-valuenow", "0");
     document.getElementById("jobProgressPercent").textContent = "0%";
     document.getElementById("jobProgressLabel").textContent = "进度";
-    document.getElementById("jobProgressMessage").textContent = "";
+    document.getElementById("jobStatusValue").textContent = "—";
+    document.getElementById("jobStatusValue").className = "";
+    document.getElementById("jobStageValue").textContent = "—";
+    document.getElementById("jobElapsedValue").textContent = "—";
+    if (hintEl) {
+      hintEl.hidden = false;
+      hintEl.className = "empty-hint";
+      hintEl.textContent =
+        "在「数据接入」提交任务后，在此查看进度；完成后可一键在地图中打开。";
+    }
   }
 
   function renderJobProgress(job) {
     const progressEl = document.getElementById("jobProgress");
     const fillEl = document.getElementById("jobProgressFill");
     const barEl = document.getElementById("jobProgressBar");
+    const hintEl = document.getElementById("jobQueryHint");
     const progress = job && job.progress ? job.progress : null;
 
-    if (!progress && !job) {
+    if (!job) {
       clearJobProgress();
       return;
     }
@@ -358,12 +397,9 @@
     if (job.status === "queued" && !progress) percent = 0;
 
     const phase = (progress && progress.phase) || job.stage || job.status;
-    const message =
-      (progress && progress.message) ||
-      (job.status === "failed" ? job.error : "") ||
-      "";
 
     progressEl.hidden = false;
+    if (hintEl) hintEl.hidden = true;
     fillEl.style.width = percent + "%";
     fillEl.className =
       "job-progress-fill" +
@@ -375,9 +411,16 @@
     barEl.setAttribute("aria-valuenow", String(Math.round(percent)));
     document.getElementById("jobProgressPercent").textContent =
       formatProgressPercent(percent);
-    document.getElementById("jobProgressLabel").textContent =
+    document.getElementById("jobProgressLabel").textContent = "进度";
+
+    const statusEl = document.getElementById("jobStatusValue");
+    statusEl.textContent = statusLabel(job.status);
+    statusEl.className = statusBadgeClass(job.status);
+    document.getElementById("jobStageValue").textContent =
       progressPhaseLabel(phase);
-    document.getElementById("jobProgressMessage").textContent = message || "";
+    document.getElementById("jobElapsedValue").textContent = formatElapsed(
+      job.elapsed_seconds
+    );
   }
 
   function updatePublishControls(job) {
@@ -396,44 +439,9 @@
   }
 
   function renderJobDetail(job) {
-    const detailEl = document.getElementById("jobDetail");
     const previewBtn = document.getElementById("openJobTilesetBtn");
 
     renderJobProgress(job);
-
-    const progress = job.progress || {};
-    const lines = [
-      ["任务 ID", job.job_id],
-      ["状态", job.status],
-      ["阶段", job.stage || "—"],
-      ["Tileset", job.tileset_name || "—"],
-      ["已发布", job.published ? "是" : "否"],
-      ["影像 URL", job.imagery_url || "—"],
-      ["错误", job.error || "—"],
-    ];
-
-    if (progress.current_zoom != null || progress.max_zoom != null) {
-      lines.splice(3, 0, [
-        "Zoom",
-        (progress.current_zoom != null ? progress.current_zoom : "—") +
-          " / " +
-          (progress.max_zoom != null ? progress.max_zoom : "—"),
-      ]);
-    }
-
-    detailEl.innerHTML = lines
-      .map(function (pair) {
-        return (
-          "<dt>" +
-          pair[0] +
-          '</dt><dd><span class="' +
-          (pair[0] === "状态" ? statusBadgeClass(job.status) : "") +
-          '">' +
-          pair[1] +
-          "</span></dd>"
-        );
-      })
-      .join("");
 
     const canPreview = job.published && job.tileset_name;
     previewBtn.disabled = !canPreview;
@@ -476,8 +484,12 @@
       } catch (err) {
         stopPolling();
         clearJobProgress();
-        document.getElementById("jobDetail").innerHTML =
-          '<p class="error-text">查询失败: ' + err.message + "</p>";
+        const hintEl = document.getElementById("jobQueryHint");
+        if (hintEl) {
+          hintEl.hidden = false;
+          hintEl.className = "error-text";
+          hintEl.textContent = "查询失败: " + err.message;
+        }
         updatePublishControls(null);
       }
     }
@@ -610,17 +622,11 @@
       tile_scheme: document.getElementById("optTileScheme").value,
       end_zoom: readOptionalInt("optEndZoom") ?? 0,
       resampling_method: document.getElementById("optResampling").value,
-      resume: document.getElementById("optResume").checked,
     };
 
     const startZoom = readOptionalInt("optStartZoom");
     if (startZoom !== undefined) {
       tiling_options.start_zoom = startZoom;
-    }
-
-    const threadCount = readOptionalInt("optThreadCount");
-    if (threadCount !== undefined) {
-      tiling_options.thread_count = threadCount;
     }
 
     const publish = {

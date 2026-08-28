@@ -8,9 +8,10 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
-from app.schemas import JobProgress
+from app.schemas import JobProgress, JobStatus
 
 ProgressCallback = Callable[[JobProgress], None]
 
@@ -266,3 +267,36 @@ def run_gdal_command(
 def progress_to_store_fields(progress: JobProgress) -> dict[str, Any]:
     """Serialize JobProgress for Redis job metadata."""
     return {"progress": progress.model_dump()}
+
+
+def _parse_iso_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+def compute_elapsed_seconds(
+    data: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> float | None:
+    """Compute wall-clock job duration in seconds from stored timestamps."""
+    start = _parse_iso_timestamp(data.get("created_at"))
+    if start is None:
+        return None
+
+    end = _parse_iso_timestamp(data.get("completed_at"))
+    if end is None:
+        status = data.get("status")
+        if status in {JobStatus.COMPLETED.value, JobStatus.FAILED.value}:
+            end = _parse_iso_timestamp(data.get("updated_at")) or start
+        else:
+            end = now or datetime.now(UTC)
+
+    return round(max(0.0, (end - start).total_seconds()), 3)

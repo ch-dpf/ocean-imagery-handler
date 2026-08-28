@@ -534,6 +534,34 @@ body {
   line-height: 1.6;
 }
 
+.job-detail-compact {
+  display: grid;
+  grid-template-columns: 2.5em 1fr;
+  column-gap: 12px;
+  row-gap: 8px;
+  align-items: center;
+  margin: 12px 0 0;
+}
+
+.job-detail-compact dt {
+  margin: 0;
+  color: #aaa;
+  line-height: 1.4;
+}
+
+.job-detail-compact dd {
+  margin: 0;
+  justify-self: start;
+  min-width: 0;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.job-detail-compact dd.status-badge {
+  width: max-content;
+  max-width: 100%;
+}
+
 .job-detail dt {
   color: #aaa;
   margin-top: 8px;

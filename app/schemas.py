@@ -100,9 +100,12 @@ class TilingOptions(BaseModel):
     thread_count: int | None = Field(
         default=None,
         ge=1,
-        description="Parallel jobs for gdal raster tile (-j)",
+        description="Parallel jobs for gdal raster tile (-j); defaults to TILING_THREAD_COUNT",
     )
-    resume: bool = Field(default=False, description="Resume interrupted tiling")
+    resume: bool | None = Field(
+        default=None,
+        description="Resume interrupted tiling; defaults to TILING_RESUME",
+    )
     verbose: bool = False
     kml: bool = Field(default=False, description="Generate KML overview")
     tile_scheme: TileScheme = Field(
@@ -169,6 +172,19 @@ class ImageryJobDetail(BaseModel):
     status: JobStatus
     progress: JobProgress | None = None
     stage: str | None = None
+    created_at: str | None = Field(
+        default=None,
+        description="UTC ISO-8601 timestamp when the job was created",
+    )
+    completed_at: str | None = Field(
+        default=None,
+        description="UTC ISO-8601 timestamp when the job finished (completed or failed)",
+    )
+    elapsed_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        description="Wall-clock seconds from created_at to completed_at (or now if still running)",
+    )
     input_path: str | None = None
     output_dir: str | None = None
     imagery_url: str | None = None
@@ -197,6 +213,39 @@ class TilesetInfo(BaseModel):
 
 class TilesetListResponse(BaseModel):
     tilesets: list[TilesetInfo]
+
+
+class DiskPublishRequest(BaseModel):
+    """Publish tiles from disk without requiring Redis job metadata."""
+
+    job_id: str | None = Field(
+        default=None,
+        description="Publish jobs/{job_id}/tiles/ (mutually exclusive with tiles_dir)",
+    )
+    tiles_dir: str | None = Field(
+        default=None,
+        description="Absolute or workspace-relative tiles directory (mutually exclusive with job_id)",
+    )
+    tileset_name: str | None = Field(
+        default=None,
+        description="Published tileset name; defaults to job_id",
+    )
+    profile: TileProfile | None = Field(
+        default=None,
+        description="Override tiling profile; defaults to tile.json or mercator",
+    )
+    tile_format: TileFormat | None = Field(
+        default=None,
+        description="Override tile format; defaults to tile.json or PNG",
+    )
+    tile_scheme: TileScheme | None = Field(
+        default=None,
+        description="Override tile scheme; defaults to tile.json or xyz",
+    )
+    bounds_wgs84: list[float] | None = Field(
+        default=None,
+        description="Override WGS84 bounds [west, south, east, north]",
+    )
 
 
 class WorkspaceEntryInfo(BaseModel):

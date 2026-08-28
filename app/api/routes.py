@@ -17,15 +17,17 @@ from app.schemas import (
     JobStatus,
     PreprocessOptions,
     PublishOptions,
+    DiskPublishRequest,
     TilesetInfo,
     TilesetListResponse,
     TilingOptions,
     WorkspaceEntryInfo,
     WorkspaceListResponse,
 )
+from app.services.job_progress import compute_elapsed_seconds
 from app.services.job_store import CorruptJobDataError, JobStore
 from app.services.tile_json import TILE_JSON, crs_label_for_profile, scheme_label
-from app.services.tile_publisher import PublishError, list_published_tilesets
+from app.services.tile_publisher import PublishError, list_published_tilesets, publish_from_disk, unpublish_tileset
 from app.services.workspace_browser import WorkspacePathError, list_workspace
 from app.worker.tasks import (
     create_job_from_path,
@@ -41,6 +43,9 @@ _JOB_DETAIL_FIELDS = {
     "status",
     "stage",
     "progress",
+    "created_at",
+    "completed_at",
+    "elapsed_seconds",
     "input_path",
     "output_dir",
     "imagery_url",
@@ -69,6 +74,9 @@ def _job_detail_from_store(data: dict) -> ImageryJobDetail:
         status=JobStatus(data["status"]),
         progress=_progress_from_store(data),
         stage=data.get("stage"),
+        created_at=data.get("created_at"),
+        completed_at=data.get("completed_at"),
+        elapsed_seconds=compute_elapsed_seconds(data),
         input_path=data.get("input_path"),
         output_dir=data.get("output_dir"),
         imagery_url=data.get("imagery_url"),
@@ -217,14 +225,21 @@ async def publish_job(
     job_id: str,
     body: ManualPublishRequest | None = Body(default=None),
 ) -> ImageryJobDetail:
-    """Publish a completed job's tiles via imagery-server (nginx)."""
+    """Publish a completed job's tiles via imagery-server (nginx).
+
+    If Redis job metadata has expired, publishes from disk at jobs/{job_id}/tiles/.
+    """
     tileset_name = body.tileset_name if body is not None else None
     try:
-        publish_completed_job(job_id, tileset_name=tileset_name)
+        imagery_url, resolved_name, url_template = publish_completed_job(
+            job_id, tileset_name=tileset_name
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PublishError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        detail = str(exc)
+        status = 404 if "not found" in detail.lower() else 500
+        raise HTTPException(status_code=status, detail=detail) from exc
 
     try:
         data = _store().get(job_id)
@@ -233,13 +248,29 @@ async def publish_job(
             status_code=500,
             detail="Job metadata is corrupted in the store",
         ) from exc
-    assert data is not None
-    return _job_detail_from_store(data)
+
+    if data is not None:
+        return _job_detail_from_store(data)
+
+    settings = get_settings()
+    return ImageryJobDetail(
+        job_id=job_id,
+        status=JobStatus.COMPLETED,
+        stage="done",
+        output_dir=str(settings.jobs_dir / job_id / "tiles"),
+        imagery_url=imagery_url,
+        tileset_name=resolved_name,
+        cesium_url_template=url_template,
+        published=True,
+    )
 
 
 @router.delete("/jobs/{job_id}/publish", response_model=ImageryJobDetail)
 async def unpublish_job(job_id: str) -> ImageryJobDetail:
-    """Remove a job's published tileset registration."""
+    """Remove a job's published tileset registration.
+
+    If Redis metadata is gone, removes the symlink named after job_id when present.
+    """
     try:
         unpublish_completed_job(job_id)
     except ValueError as exc:
@@ -254,8 +285,15 @@ async def unpublish_job(job_id: str) -> ImageryJobDetail:
             status_code=500,
             detail="Job metadata is corrupted in the store",
         ) from exc
-    assert data is not None
-    return _job_detail_from_store(data)
+
+    if data is not None:
+        return _job_detail_from_store(data)
+
+    return ImageryJobDetail(
+        job_id=job_id,
+        status=JobStatus.COMPLETED,
+        published=False,
+    )
 
 
 @router.get("/workspace", response_model=WorkspaceListResponse)
@@ -285,6 +323,51 @@ async def list_workspace_entries(
             for entry in listing.entries
         ],
     )
+
+
+@router.post("/tilesets/publish", response_model=TilesetInfo)
+async def publish_tileset_from_disk(body: DiskPublishRequest) -> TilesetInfo:
+    """Publish tiles from disk without requiring Redis job metadata.
+
+    Provide either ``job_id`` (uses ``jobs/{job_id}/tiles/``) or ``tiles_dir``.
+    Metadata is inferred from existing ``tile.json`` when available.
+    """
+    settings = get_settings()
+    try:
+        imagery_url, name, _url_template, _tiles_dir = publish_from_disk(
+            jobs_dir=settings.jobs_dir,
+            workspace_dir=settings.workspace_dir,
+            tilesets_dir=settings.tilesets_dir,
+            public_url=settings.imagery_server_public_url,
+            base_path=settings.imagery_base_path,
+            job_id=body.job_id,
+            tiles_dir=body.tiles_dir,
+            tileset_name=body.tileset_name,
+            profile=body.profile,
+            tile_format=body.tile_format,
+            tile_scheme=body.tile_scheme,
+            bounds_wgs84=body.bounds_wgs84,
+            gdal_cachemax=settings.gdal_cachemax,
+        )
+    except PublishError as exc:
+        detail = str(exc)
+        status = 404 if "not found" in detail.lower() else 400
+        raise HTTPException(status_code=status, detail=detail) from exc
+
+    _ = imagery_url
+    return _tileset_info_from_name(name, settings)
+
+
+@router.delete("/tilesets/{tileset_name}", response_model=TilesetInfo)
+async def unpublish_tileset_by_name(tileset_name: str) -> TilesetInfo:
+    """Unpublish a tileset by name without requiring Redis job metadata."""
+    settings = get_settings()
+    info = _tileset_info_from_name(tileset_name, settings)
+    try:
+        unpublish_tileset(settings.tilesets_dir, tileset_name)
+    except PublishError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return info
 
 
 @router.get("/tilesets", response_model=TilesetListResponse)

@@ -108,7 +108,34 @@ curl http://localhost:8100/api/v1/imagery/jobs/{job_id}
 任务状态：`queued` → `preprocessing` → `tiling` → `publishing` → `completed` / `failed`
 
 输出目录：`./data/jobs/{job_id}/tiles/`  
-发布 URL：`http://localhost:8102/imagery/{job_id}/`（任务完成后自动发布）
+发布 URL：`http://localhost:8102/imagery/{job_id}/`（需手动发布，或开启 `auto_publish`）
+
+### 发布 / 下架
+
+任务仍在 Redis 中时：
+
+```bash
+curl -X POST http://localhost:8100/api/v1/imagery/jobs/{job_id}/publish \
+  -H "Content-Type: application/json" \
+  -d '{"tileset_name": "optional-name"}'
+
+curl -X DELETE http://localhost:8100/api/v1/imagery/jobs/{job_id}/publish
+```
+
+Redis 中 `job_id` 已过期、但磁盘瓦片仍在时，可任选其一：
+
+```bash
+# 仍可用原接口：自动从 jobs/{job_id}/tiles/ 发布
+curl -X POST http://localhost:8100/api/v1/imagery/jobs/{job_id}/publish
+
+# 或不依赖 job 元数据的磁盘发布
+curl -X POST http://localhost:8100/api/v1/imagery/tilesets/publish \
+  -H "Content-Type: application/json" \
+  -d '{"job_id": "{job_id}", "tileset_name": "optional-name"}'
+
+# 按名称下架（不依赖 Redis）
+curl -X DELETE http://localhost:8100/api/v1/imagery/tilesets/{tileset_name}
+```
 
 ### Cesium 客户端加载
 
@@ -167,8 +194,8 @@ viewer.imageryLayers.addImageryProvider(imageryProvider);
 | `start_zoom` | int | 自动 | 最大 zoom（最精细） |
 | `end_zoom` | int | `0` | 最小 zoom |
 | `resampling_method` | string | `bilinear` | `gdal raster tile` 重采样（`antialias` 映射为 `lanczos`） |
-| `thread_count` | int | — | 并行任务数（`-j`） |
-| `resume` | bool | `false` | 断点续切 |
+| `thread_count` | int | `TILING_THREAD_COUNT` | 并行任务数（`-j`）；请求省略时用环境变量 |
+| `resume` | bool | `TILING_RESUME` | 断点续切；请求省略时用环境变量 |
 | `tile_scheme` | string | `xyz` | `xyz` 或 `tms` |
 
 ### 发布 `publish`
@@ -237,7 +264,9 @@ ocean-imagery-handler/
 | `JOB_TTL` | `604800` | 任务状态保留 (秒) |
 | `IMAGERY_SERVER_PUBLIC_URL` | `http://localhost:8102` | 对外 URL |
 | `IMAGERY_BASE_PATH` | `/imagery` | URL 前缀 |
-| `AUTO_PUBLISH` | `true` | 自动发布 |
+| `AUTO_PUBLISH` | `false` | 自动发布 |
+| `TILING_THREAD_COUNT` | — | 默认并行切片线程数（请求未指定 `thread_count` 时生效） |
+| `TILING_RESUME` | `false` | 默认是否断点续切（请求未指定 `resume` 时生效） |
 
 ## 注意事项
 
@@ -245,6 +274,7 @@ ocean-imagery-handler/
 - 默认 Web Mercator（EPSG:3857）+ `mercator` profile，与 Cesium `WebMercatorTilingScheme` 匹配
 - 大文件建议设置 `start_zoom` / `end_zoom` 控制级别，避免磁盘爆满
 - 发布通过符号链接注册瓦片，Worker 需有创建 symlink 权限
+- Redis 中 job 元数据会随 `JOB_TTL` 过期；磁盘瓦片仍可通过 `/jobs/{id}/publish` 或 `/tilesets/publish` 发布
 - `imagery-server` 挂载完整 `./data` 目录，以便 symlink 解析到 `jobs/` 下的瓦片
 - Docker 镜像基于 `ghcr.io/osgeo/gdal:ubuntu-small-3.12.0`（GDAL 3.12）
 

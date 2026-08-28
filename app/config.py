@@ -29,7 +29,11 @@ class Settings(BaseSettings):
 
     imagery_server_public_url: str = "http://localhost:8102"
     imagery_base_path: str = "/imagery"
-    auto_publish: bool = True
+    auto_publish: bool = False
+
+    # Default tiling options when request omits them (API still accepts overrides)
+    tiling_thread_count: int | None = None
+    tiling_resume: bool = False
 
     @property
     def jobs_dir(self) -> Path:

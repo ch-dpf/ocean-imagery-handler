@@ -3,11 +3,12 @@
 import logging
 import shutil
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 from app.config import get_settings
-from app.schemas import ImageryJobCreate, JobProgress, JobStatus
+from app.schemas import ImageryJobCreate, JobProgress, JobStatus, TilingOptions
 from app.services.job_progress import (
     JobProgressTracker,
     ThrottledProgressWriter,
@@ -27,6 +28,10 @@ logger = logging.getLogger(__name__)
 
 def _store() -> JobStore:
     return JobStore(get_settings())
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 class _JobProgressReporter:
@@ -117,6 +122,20 @@ def _should_auto_publish(request: ImageryJobCreate, settings) -> bool:
     return settings.auto_publish
 
 
+def _resolve_tiling_options(tiling: TilingOptions, settings) -> TilingOptions:
+    """Fill thread_count / resume from settings when the request omits them."""
+    return tiling.model_copy(
+        update={
+            "thread_count": (
+                tiling.thread_count
+                if tiling.thread_count is not None
+                else settings.tiling_thread_count
+            ),
+            "resume": tiling.resume if tiling.resume is not None else settings.tiling_resume,
+        }
+    )
+
+
 def _publish_job_tileset(
     job_id: str,
     output_dir: Path,
@@ -192,7 +211,7 @@ def process_imagery_job(self, job_id: str, request_data: dict) -> dict:
         bounds_wgs84 = parse_wgs84_bounds(preprocessed, env={"GDAL_CACHEMAX": str(settings.gdal_cachemax)})
         store.update(job_id, bounds_wgs84=bounds_wgs84)
 
-        tiling = request.tiling_options
+        tiling = _resolve_tiling_options(request.tiling_options, settings)
         min_zoom = tiling.end_zoom
         max_zoom = tiling.start_zoom
         reporter.begin_stage(
@@ -241,6 +260,7 @@ def process_imagery_job(self, job_id: str, request_data: dict) -> dict:
                 cesium_url_template=url_template,
                 published=True,
                 error=None,
+                completed_at=_utc_now_iso(),
             )
             reporter.complete(message="Completed and published")
             result.update(
@@ -259,6 +279,7 @@ def process_imagery_job(self, job_id: str, request_data: dict) -> dict:
                 output_dir=str(output_dir),
                 published=False,
                 error=None,
+                completed_at=_utc_now_iso(),
             )
             reporter.complete(message="Completed")
 
@@ -282,18 +303,36 @@ def process_imagery_job(self, job_id: str, request_data: dict) -> dict:
             status=JobStatus.FAILED.value,
             stage="failed",
             error=str(exc),
+            completed_at=_utc_now_iso(),
             **progress_to_store_fields(failed_progress),
         )
         raise
 
 
 def publish_completed_job(job_id: str, tileset_name: str | None = None) -> tuple[str, str, str]:
-    """Publish tiles for a completed job (manual API)."""
+    """Publish tiles for a completed job (manual API).
+
+    Uses Redis metadata when available; otherwise publishes from disk
+    at jobs/{job_id}/tiles/ (for expired Redis TTL cases).
+    """
+    from app.services.tile_publisher import publish_from_disk
+
     settings = get_settings()
     store = _store()
     data = store.get(job_id)
+
     if data is None:
-        raise ValueError(f"Job not found: {job_id}")
+        imagery_url, resolved_name, url_template, _tiles_dir = publish_from_disk(
+            jobs_dir=settings.jobs_dir,
+            workspace_dir=settings.workspace_dir,
+            tilesets_dir=settings.tilesets_dir,
+            public_url=settings.imagery_server_public_url,
+            base_path=settings.imagery_base_path,
+            job_id=job_id,
+            tileset_name=tileset_name,
+            gdal_cachemax=settings.gdal_cachemax,
+        )
+        return imagery_url, resolved_name, url_template
 
     status = data.get("status")
     allowed = {JobStatus.COMPLETED.value, JobStatus.PUBLISHING.value}
@@ -346,7 +385,10 @@ def publish_completed_job(job_id: str, tileset_name: str | None = None) -> tuple
 
 
 def unpublish_completed_job(job_id: str) -> None:
-    """Remove published tileset for a job."""
+    """Remove published tileset for a job.
+
+    If Redis metadata is gone, attempts to unpublish the symlink named job_id.
+    """
     from app.services.job_store import CorruptJobDataError
     from app.services.tile_publisher import unpublish_tileset
 
@@ -362,7 +404,9 @@ def unpublish_completed_job(job_id: str) -> None:
         data = None
 
     if data is None and not corrupt_metadata:
-        raise ValueError(f"Job not found: {job_id}")
+        # Redis expired: still try to remove symlink registered under job_id.
+        unpublish_tileset(settings.tilesets_dir, job_id)
+        return
 
     if data is not None:
         tileset_name = data.get("tileset_name") or job_id
@@ -375,8 +419,9 @@ def unpublish_completed_job(job_id: str) -> None:
         "cesium_url_template": None,
     }
     if corrupt_metadata:
-        update_fields["status"] = JobStatus.COMPLETED.value
-    store.update(job_id, **update_fields)
+        store.overwrite(job_id, status=JobStatus.COMPLETED.value, **update_fields)
+    else:
+        store.update(job_id, **update_fields)
 
 
 def create_job_from_upload(
