@@ -1,4 +1,4 @@
-"""REST API routes."""
+"""REST API 路由。"""
 
 import json
 import shutil
@@ -13,7 +13,6 @@ from app.schemas import (
     ImageryJobCreate,
     ImageryJobDetail,
     ImageryJobResponse,
-    JobProgress,
     JobStatus,
     PreprocessOptions,
     PublishOptions,
@@ -24,7 +23,7 @@ from app.schemas import (
     WorkspaceEntryInfo,
     WorkspaceListResponse,
 )
-from app.services.job_progress import compute_elapsed_seconds
+from app.services.job_detail import job_detail_from_store
 from app.services.job_store import CorruptJobDataError, JobStore
 from app.services.tile_json import TILE_JSON, crs_label_for_profile, scheme_label
 from app.services.tile_publisher import PublishError, list_published_tilesets, publish_from_disk, unpublish_tileset
@@ -36,66 +35,21 @@ from app.worker.tasks import (
     unpublish_completed_job,
 )
 
-router = APIRouter(prefix="/api/v1/imagery", tags=["imagery"])
-
-_JOB_DETAIL_FIELDS = {
-    "job_id",
-    "status",
-    "stage",
-    "progress",
-    "created_at",
-    "completed_at",
-    "elapsed_seconds",
-    "input_path",
-    "output_dir",
-    "imagery_url",
-    "tileset_name",
-    "cesium_url_template",
-    "published",
-    "bounds_wgs84",
-    "error",
-}
+router = APIRouter(prefix="/api/v1/imagery", tags=["影像服务"])
 
 
 def _store() -> JobStore:
     return JobStore(get_settings())
 
 
-def _progress_from_store(data: dict) -> JobProgress | None:
-    raw = data.get("progress")
-    if not raw:
-        return None
-    return JobProgress.model_validate(raw)
-
-
 def _job_detail_from_store(data: dict) -> ImageryJobDetail:
-    return ImageryJobDetail(
-        job_id=data["job_id"],
-        status=JobStatus(data["status"]),
-        progress=_progress_from_store(data),
-        stage=data.get("stage"),
-        created_at=data.get("created_at"),
-        completed_at=data.get("completed_at"),
-        elapsed_seconds=compute_elapsed_seconds(data),
-        input_path=data.get("input_path"),
-        output_dir=data.get("output_dir"),
-        imagery_url=data.get("imagery_url"),
-        tileset_name=data.get("tileset_name"),
-        cesium_url_template=data.get("cesium_url_template"),
-        published=bool(data.get("published")),
-        error=data.get("error"),
-        metadata={
-            key: value
-            for key, value in data.items()
-            if key not in _JOB_DETAIL_FIELDS | {"request"}
-        },
-    )
+    return job_detail_from_store(data)
 
 
 class ManualPublishRequest(BaseModel):
     tileset_name: str | None = Field(
         default=None,
-        description="Override tileset name; omit to use job_id",
+        description="覆盖瓦片集名称；省略则使用 job_id",
     )
 
 
@@ -143,9 +97,9 @@ def _tileset_info_from_name(name: str, settings) -> TilesetInfo:
     )
 
 
-@router.post("/jobs", response_model=ImageryJobResponse)
+@router.post("/jobs", response_model=ImageryJobResponse, summary="提交切片任务")
 async def create_job(request: ImageryJobCreate) -> ImageryJobResponse:
-    """Submit a tiling job for an existing file in the workspace."""
+    """为工作区内已有 GeoTIFF 文件提交影像切片任务。"""
     try:
         job_id = create_job_from_path(request)
     except FileNotFoundError as exc:
@@ -161,14 +115,14 @@ async def create_job(request: ImageryJobCreate) -> ImageryJobResponse:
     )
 
 
-@router.post("/jobs/upload", response_model=ImageryJobResponse)
+@router.post("/jobs/upload", response_model=ImageryJobResponse, summary="上传并提交切片任务")
 async def create_job_with_upload(
-    file: UploadFile = File(...),
-    preprocess_json: str | None = Form(default=None),
-    tiling_options_json: str | None = Form(default=None),
-    publish_json: str | None = Form(default=None),
+    file: UploadFile = File(..., description="正射影像 GeoTIFF 文件"),
+    preprocess_json: str | None = Form(default=None, description="预处理选项 JSON（PreprocessOptions）"),
+    tiling_options_json: str | None = Form(default=None, description="切片选项 JSON（TilingOptions）"),
+    publish_json: str | None = Form(default=None, description="发布选项 JSON（PublishOptions）"),
 ) -> ImageryJobResponse:
-    """Upload a GeoTIFF orthophoto and submit a tiling job."""
+    """上传 GeoTIFF 正射影像并提交切片任务。"""
     settings = get_settings()
     settings.uploads_dir.mkdir(parents=True, exist_ok=True)
 
@@ -204,9 +158,9 @@ async def create_job_with_upload(
     )
 
 
-@router.get("/jobs/{job_id}", response_model=ImageryJobDetail)
+@router.get("/jobs/{job_id}", response_model=ImageryJobDetail, summary="查询任务状态")
 async def get_job(job_id: str) -> ImageryJobDetail:
-    """Get job status and result paths."""
+    """查询任务状态、进度与结果路径。"""
     try:
         data = _store().get(job_id)
     except CorruptJobDataError as exc:
@@ -220,14 +174,14 @@ async def get_job(job_id: str) -> ImageryJobDetail:
     return _job_detail_from_store(data)
 
 
-@router.post("/jobs/{job_id}/publish", response_model=ImageryJobDetail)
+@router.post("/jobs/{job_id}/publish", response_model=ImageryJobDetail, summary="发布任务瓦片")
 async def publish_job(
     job_id: str,
     body: ManualPublishRequest | None = Body(default=None),
 ) -> ImageryJobDetail:
-    """Publish a completed job's tiles via imagery-server (nginx).
+    """将已完成任务的瓦片发布到 imagery-server（nginx）。
 
-    If Redis job metadata has expired, publishes from disk at jobs/{job_id}/tiles/.
+    若 Redis 任务元数据已过期，则从磁盘 jobs/{job_id}/tiles/ 发布。
     """
     tileset_name = body.tileset_name if body is not None else None
     try:
@@ -265,11 +219,11 @@ async def publish_job(
     )
 
 
-@router.delete("/jobs/{job_id}/publish", response_model=ImageryJobDetail)
+@router.delete("/jobs/{job_id}/publish", response_model=ImageryJobDetail, summary="取消发布任务瓦片")
 async def unpublish_job(job_id: str) -> ImageryJobDetail:
-    """Remove a job's published tileset registration.
+    """移除任务已发布的瓦片集注册。
 
-    If Redis metadata is gone, removes the symlink named after job_id when present.
+    若 Redis 元数据已不存在，则删除以 job_id 命名的符号链接（若存在）。
     """
     try:
         unpublish_completed_job(job_id)
@@ -296,11 +250,11 @@ async def unpublish_job(job_id: str) -> ImageryJobDetail:
     )
 
 
-@router.get("/workspace", response_model=WorkspaceListResponse)
+@router.get("/workspace", response_model=WorkspaceListResponse, summary="浏览工作区")
 async def list_workspace_entries(
-    path: str = Query(default="", description="Directory path relative to workspace root"),
+    path: str = Query(default="", description="相对于工作区根目录的目录路径"),
 ) -> WorkspaceListResponse:
-    """List directories and selectable GeoTIFF files in the workspace."""
+    """列出工作区内的目录与可选 GeoTIFF 文件。"""
     settings = get_settings()
     try:
         listing = list_workspace(settings.workspace_dir, path)
@@ -325,12 +279,12 @@ async def list_workspace_entries(
     )
 
 
-@router.post("/tilesets/publish", response_model=TilesetInfo)
+@router.post("/tilesets/publish", response_model=TilesetInfo, summary="从磁盘发布瓦片集")
 async def publish_tileset_from_disk(body: DiskPublishRequest) -> TilesetInfo:
-    """Publish tiles from disk without requiring Redis job metadata.
+    """从磁盘发布瓦片，无需 Redis 任务元数据。
 
-    Provide either ``job_id`` (uses ``jobs/{job_id}/tiles/``) or ``tiles_dir``.
-    Metadata is inferred from existing ``tile.json`` when available.
+    提供 ``job_id``（使用 ``jobs/{job_id}/tiles/``）或 ``tiles_dir`` 之一。
+    元数据优先从已有 ``tile.json`` 推断。
     """
     settings = get_settings()
     try:
@@ -358,9 +312,9 @@ async def publish_tileset_from_disk(body: DiskPublishRequest) -> TilesetInfo:
     return _tileset_info_from_name(name, settings)
 
 
-@router.delete("/tilesets/{tileset_name}", response_model=TilesetInfo)
+@router.delete("/tilesets/{tileset_name}", response_model=TilesetInfo, summary="取消发布瓦片集")
 async def unpublish_tileset_by_name(tileset_name: str) -> TilesetInfo:
-    """Unpublish a tileset by name without requiring Redis job metadata."""
+    """按名称取消发布瓦片集，无需 Redis 任务元数据。"""
     settings = get_settings()
     info = _tileset_info_from_name(tileset_name, settings)
     try:
@@ -370,9 +324,9 @@ async def unpublish_tileset_by_name(tileset_name: str) -> TilesetInfo:
     return info
 
 
-@router.get("/tilesets", response_model=TilesetListResponse)
+@router.get("/tilesets", response_model=TilesetListResponse, summary="列出已发布瓦片集")
 async def list_tilesets() -> TilesetListResponse:
-    """List tilesets registered for imagery-server."""
+    """列出已在 imagery-server 注册的瓦片集。"""
     settings = get_settings()
     names = list_published_tilesets(settings.tilesets_dir)
     tilesets: list[TilesetInfo] = []
