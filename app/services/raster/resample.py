@@ -7,6 +7,11 @@ from PIL import Image
 
 from app.schemas import ResamplingMethod
 
+try:
+    import cv2
+except ImportError:  # pragma: no cover - optional acceleration
+    cv2 = None
+
 RESAMPLE_NEAREST = "nearest"
 RESAMPLE_BILINEAR = "bilinear"
 RESAMPLE_CUBIC = "cubic"
@@ -34,6 +39,15 @@ PIL_RESAMPLING = {
     RESAMPLE_LANCZOS: Image.Resampling.LANCZOS,
     RESAMPLE_AVERAGE: Image.Resampling.BOX,
     RESAMPLE_MODE: Image.Resampling.NEAREST,
+}
+
+_CV2_INTER = None if cv2 is None else {
+    RESAMPLE_NEAREST: cv2.INTER_NEAREST,
+    RESAMPLE_MODE: cv2.INTER_NEAREST,
+    RESAMPLE_BILINEAR: cv2.INTER_LINEAR,
+    RESAMPLE_AVERAGE: cv2.INTER_LINEAR,
+    RESAMPLE_CUBIC: cv2.INTER_CUBIC,
+    RESAMPLE_LANCZOS: cv2.INTER_LANCZOS4,
 }
 
 
@@ -82,8 +96,21 @@ def resize_array(array: np.ndarray, out_h: int, out_w: int, method: str) -> np.n
         raise ValueError("output size must be positive")
     if array.shape[0] == out_h and array.shape[1] == out_w:
         return to_uint8(array)
-    image = array_to_image(array)
-    resample = PIL_RESAMPLING.get(normalize_resampling(method), Image.Resampling.BILINEAR)
+    kind = normalize_resampling(method)
+    src = to_uint8(array)
+    if cv2 is not None and _CV2_INTER is not None:
+        hwc = np.ascontiguousarray(src[:, :, np.newaxis] if src.ndim == 2 else src)
+        down = out_h < hwc.shape[0] or out_w < hwc.shape[1]
+        if down and kind in {RESAMPLE_AVERAGE, RESAMPLE_BILINEAR}:
+            interp = cv2.INTER_AREA
+        else:
+            interp = _CV2_INTER.get(kind, cv2.INTER_LINEAR)
+        if hwc.shape[2] == 1:
+            out = cv2.resize(hwc[:, :, 0], (out_w, out_h), interpolation=interp)
+            return out if src.ndim == 2 else out[:, :, np.newaxis]
+        return cv2.resize(hwc, (out_w, out_h), interpolation=interp)
+    image = array_to_image(src)
+    resample = PIL_RESAMPLING.get(kind, Image.Resampling.BILINEAR)
     resized = image.resize((out_w, out_h), resample)
     return image_to_array(resized)
 
@@ -212,3 +239,51 @@ def sample_image(src: np.ndarray, rows: np.ndarray, cols: np.ndarray, method: st
     if kind == RESAMPLE_LANCZOS:
         return sample_lanczos(src, rows, cols)
     return sample_bilinear(src, rows, cols)
+
+
+def upsample2d(array: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
+    """Bilinear-upsample a 2D float grid to (out_h, out_w)."""
+    src = np.ascontiguousarray(array.astype(np.float32, copy=False))
+    if src.shape[0] == out_h and src.shape[1] == out_w:
+        return src
+    if cv2 is not None:
+        return cv2.resize(src, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+    ys = (np.arange(out_h, dtype=np.float64) + 0.5) * src.shape[0] / out_h - 0.5
+    xs = (np.arange(out_w, dtype=np.float64) + 0.5) * src.shape[1] / out_w - 0.5
+    rows, cols = np.meshgrid(ys, xs, indexing="ij")
+    sampled = sample_bilinear(src[:, :, np.newaxis], rows, cols)
+    return sampled[:, :, 0]
+
+
+def remap_image(src: np.ndarray, map_x: np.ndarray, map_y: np.ndarray, method: str) -> np.ndarray:
+    """Sample ``src`` (HWC) at floating pixel coordinates (map_x, map_y)."""
+    src_u8 = to_uint8(_ensure_hwc(src))
+    map_x32 = np.ascontiguousarray(map_x.astype(np.float32, copy=False))
+    map_y32 = np.ascontiguousarray(map_y.astype(np.float32, copy=False))
+    kind = normalize_resampling(method)
+    if cv2 is not None and _CV2_INTER is not None:
+        # OpenCV treats (0, 0) as the center of the first pixel; our maps use PixelIsArea
+        # coordinates where (0, 0) is the upper-left corner.
+        map_x32 = map_x32 - 0.5
+        map_y32 = map_y32 - 0.5
+        interp = _CV2_INTER.get(kind, cv2.INTER_LINEAR)
+        if src_u8.shape[2] == 1:
+            out = cv2.remap(
+                src_u8[:, :, 0],
+                map_x32,
+                map_y32,
+                interpolation=interp,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0,
+            )
+            return out[:, :, np.newaxis]
+        return cv2.remap(
+            src_u8,
+            map_x32,
+            map_y32,
+            interpolation=interp,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+    sampled = sample_image(src_u8, map_y32, map_x32, kind)
+    return np.clip(np.rint(sampled), 0, 255).astype(np.uint8)

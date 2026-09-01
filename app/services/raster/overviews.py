@@ -9,6 +9,7 @@ import numpy as np
 import tifffile
 
 from app.services.raster.geotiff import GeoTiffReader, geotiff_extratags, tiff_compression
+from app.services.raster.parallel import default_workers, ordered_parallel_map
 from app.services.raster.resample import resize_array, to_uint8
 
 ProgressFn = Callable[[float, str | None], None]
@@ -23,6 +24,7 @@ def add_overviews(
     compress: str = "DEFLATE",
     jpeg_quality: int = 85,
     cache_bytes: int = 512 * 1024 * 1024,
+    workers: int | None = None,
     on_progress: ProgressFn | None = None,
 ) -> Path | None:
     """Write ``dataset.tif.ovr`` with average-resampled pyramid levels."""
@@ -34,6 +36,7 @@ def add_overviews(
         valid_levels = [level for level in levels if src.width // level >= 1 and src.height // level >= 1]
         if not valid_levels:
             return None
+        thread_count = default_workers() if workers is None else max(1, int(workers))
         total_tiles = 0
         specs: list[tuple[int, int, int]] = []
         for level in valid_levels:
@@ -66,33 +69,38 @@ def add_overviews(
                     samples: int = samples,
                 ) -> Iterator[np.ndarray]:
                     nonlocal done
-                    for ty in range(n_ty):
-                        for tx in range(n_tx):
-                            r0 = ty * block_size
-                            c0 = tx * block_size
-                            sl_h = min(block_size, out_h - r0)
-                            sl_w = min(block_size, out_w - c0)
-                            src_r0 = r0 * level
-                            src_c0 = c0 * level
-                            src_h = min(src.height - src_r0, sl_h * level)
-                            src_w = min(src.width - src_c0, sl_w * level)
-                            window = to_uint8(src.read_window(src_r0, src_c0, src_h, src_w))
-                            if window.shape[2] > samples:
-                                window = window[:, :, :samples]
-                            resized = resize_array(window, sl_h, sl_w, "average")
-                            if resized.shape[2] < samples:
-                                padded = np.zeros((sl_h, sl_w, samples), dtype=np.uint8)
-                                padded[:, :, : resized.shape[2]] = resized
-                                resized = padded
-                            full = np.zeros((block_size, block_size, samples), dtype=np.uint8)
-                            full[:sl_h, :sl_w] = resized[:, :, :samples]
-                            done += 1
-                            if on_progress is not None:
-                                on_progress(100.0 * done / total_tiles, "overview add")
-                            if samples == 1:
-                                yield full[:, :, 0]
-                            else:
-                                yield full
+                    coords = [(ty, tx) for ty in range(n_ty) for tx in range(n_tx)]
+
+                    def _compute_tile(coord: tuple[int, int]) -> np.ndarray:
+                        ty, tx = coord
+                        r0 = ty * block_size
+                        c0 = tx * block_size
+                        sl_h = min(block_size, out_h - r0)
+                        sl_w = min(block_size, out_w - c0)
+                        src_r0 = r0 * level
+                        src_c0 = c0 * level
+                        src_h = min(src.height - src_r0, sl_h * level)
+                        src_w = min(src.width - src_c0, sl_w * level)
+                        window = to_uint8(src.read_window(src_r0, src_c0, src_h, src_w))
+                        if window.shape[2] > samples:
+                            window = window[:, :, :samples]
+                        resized = resize_array(window, sl_h, sl_w, "average")
+                        if resized.shape[2] < samples:
+                            padded = np.zeros((sl_h, sl_w, samples), dtype=np.uint8)
+                            padded[:, :, : resized.shape[2]] = resized
+                            resized = padded
+                        full = np.zeros((block_size, block_size, samples), dtype=np.uint8)
+                        full[:sl_h, :sl_w] = resized[:, :, :samples]
+                        return full
+
+                    for full in ordered_parallel_map(coords, _compute_tile, workers=thread_count):
+                        done += 1
+                        if on_progress is not None:
+                            on_progress(100.0 * done / total_tiles, "overview add")
+                        if samples == 1:
+                            yield full[:, :, 0]
+                        else:
+                            yield full
 
                 photometric = "minisblack" if samples <= 2 else "rgb"
                 extrasamples = "unassalpha" if samples in {2, 4} else None

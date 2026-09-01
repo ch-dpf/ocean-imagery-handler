@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
+from pyproj import Transformer
 
 from app.schemas import TileFormat, TileProfile, TileScheme, TilingOptions
 from app.services.raster.affine import Affine
@@ -22,6 +22,7 @@ from app.services.raster.crsutil import (
 )
 from app.services.raster.geotiff import GeoTiffReader
 from app.services.raster.kml import write_doc_kml
+from app.services.raster.parallel import default_workers, run_unordered
 from app.services.raster.resample import array_to_image, image_to_array, normalize_resampling, resize_array
 from app.services.raster.warp import warp_window
 
@@ -196,6 +197,8 @@ def _render_scheme_tile(
     x: int,
     y: int,
     resampling: str,
+    transformer_mercator: Transformer | None = None,
+    transformer_geodetic: Transformer | None = None,
 ) -> np.ndarray:
     tile_size = options.tile_size
     if options.profile == TileProfile.RASTER:
@@ -206,17 +209,31 @@ def _render_scheme_tile(
         src_tile = tile_size * scale
         col0 = x * src_tile
         row0 = y * src_tile
-        window = src.read_window(row0, col0, src_tile, src_tile)
+        level = src.select_level(float(src_tile), float(src_tile), tile_size, tile_size)
+        if level.scale > 1:
+            sx = level.width / src.width
+            sy = level.height / src.height
+            window = src.read_window(
+                int(row0 * sy),
+                int(col0 * sx),
+                max(1, int(round(src_tile * sy))),
+                max(1, int(round(src_tile * sx))),
+                level=level,
+            )
+        else:
+            window = src.read_window(row0, col0, src_tile, src_tile)
         return resize_array(window, tile_size, tile_size, resampling)
 
     if options.profile == TileProfile.GEODETIC:
         west, south, east, north = geodetic_tile_bounds_4326(z, x, y)
         dst_crs = parse_crs("EPSG:4326")
         dst_affine = Affine.north_up(west, north, (east - west) / tile_size, (north - south) / tile_size)
+        transformer = transformer_geodetic
     else:
         minx, miny, maxx, maxy = mercator_tile_bounds_3857(z, x, y)
         dst_crs = parse_crs("EPSG:3857")
         dst_affine = Affine.north_up(minx, maxy, (maxx - minx) / tile_size, (maxy - miny) / tile_size)
+        transformer = transformer_mercator
 
     return warp_window(
         src,
@@ -229,7 +246,7 @@ def _render_scheme_tile(
         resampling,
         add_alpha=True,
         white_as_transparent=False,
-        transformer=None if crs_epsg(src.crs) == crs_epsg(dst_crs) else make_transformer(dst_crs, src.crs),
+        transformer=transformer,
     )
 
 
@@ -275,7 +292,7 @@ def generate_tiles(
 ) -> None:
     resampling = normalize_resampling(options.resampling_method)
     ext = _tile_ext(options.tile_format)
-    workers = options.thread_count or 1
+    workers = options.thread_count or default_workers()
     resume = bool(options.resume)
 
     with GeoTiffReader(input_path, cache_bytes=cache_bytes) as src:
@@ -299,36 +316,67 @@ def generate_tiles(
             if on_progress is not None:
                 on_progress(100.0 * done / total, f"Zoom {z}")
 
+        dst_crs_3857 = parse_crs("EPSG:3857")
+        dst_crs_4326 = parse_crs("EPSG:4326")
+        transformer_mercator = (
+            None if crs_epsg(src.crs) == 3857 else make_transformer(dst_crs_3857, src.crs)
+        )
+        transformer_geodetic = (
+            None if crs_epsg(src.crs) == 4326 else make_transformer(dst_crs_4326, src.crs)
+        )
+
         def render_one(z: int, x: int, y: int) -> None:
             path = _tile_path(output_dir, z, x, y, options.tile_scheme, ext)
             if resume and path.is_file() and path.stat().st_size > 0:
                 return
-            array = _render_scheme_tile(src, options, z, x, y, resampling)
+            array = _render_scheme_tile(
+                src,
+                options,
+                z,
+                x,
+                y,
+                resampling,
+                transformer_mercator=transformer_mercator,
+                transformer_geodetic=transformer_geodetic,
+            )
             _save_tile(path, array, options.tile_format)
 
         max_tiles = per_zoom.get(max_zoom, [])
-        if workers <= 1 or len(max_tiles) <= 1:
-            for x, y in max_tiles:
-                render_one(max_zoom, x, y)
-                _emit(max_zoom)
-        else:
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                futures = [pool.submit(render_one, max_zoom, x, y) for x, y in max_tiles]
-                for fut in as_completed(futures):
-                    fut.result()
-                    _emit(max_zoom)
+        run_unordered(
+            max_tiles,
+            lambda xy: render_one(max_zoom, xy[0], xy[1]),
+            workers=workers,
+            on_done=lambda: _emit(max_zoom),
+        )
 
         for z in range(max_zoom - 1, min_zoom - 1, -1):
-            for x, y in per_zoom.get(z, []):
-                path = _tile_path(output_dir, z, x, y, options.tile_scheme, ext)
+            level_tiles = per_zoom.get(z, [])
+
+            def render_parent(xy: tuple[int, int], zoom: int = z) -> None:
+                px, py = xy
+                path = _tile_path(output_dir, zoom, px, py, options.tile_scheme, ext)
                 if resume and path.is_file() and path.stat().st_size > 0:
-                    _emit(z)
-                    continue
-                array = _mosaic_children(output_dir, z, x, y, options, ext, resampling)
+                    return
+                array = _mosaic_children(output_dir, zoom, px, py, options, ext, resampling)
                 if array is None:
-                    array = _render_scheme_tile(src, options, z, x, y, resampling)
+                    array = _render_scheme_tile(
+                        src,
+                        options,
+                        zoom,
+                        px,
+                        py,
+                        resampling,
+                        transformer_mercator=transformer_mercator,
+                        transformer_geodetic=transformer_geodetic,
+                    )
                 _save_tile(path, array, options.tile_format)
-                _emit(z)
+
+            run_unordered(
+                level_tiles,
+                render_parent,
+                workers=workers,
+                on_done=lambda zoom=z: _emit(zoom),
+            )
 
         if options.kml:
             kml_tiles = [(min_zoom, x, y) for x, y in per_zoom.get(min_zoom, [])]

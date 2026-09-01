@@ -19,6 +19,7 @@ from app.services.raster.crsutil import (
 )
 from app.services.raster.errors import RasterError
 from app.services.raster.geotiff import GeoTiffReader, write_geotiff_tiled
+from app.services.raster.parallel import default_workers, ordered_parallel_map
 from app.services.raster.warp import warp_window
 
 ProgressFn = Callable[[float, str | None], None]
@@ -60,9 +61,11 @@ def reproject_geotiff(
     white_as_transparent: bool,
     cache_bytes: int,
     resampling: str = "bilinear",
+    workers: int | None = None,
     on_progress: ProgressFn | None = None,
 ) -> None:
     target = parse_crs(dst_crs)
+    thread_count = default_workers() if workers is None else max(1, int(workers))
     with GeoTiffReader(input_path, cache_bytes=cache_bytes) as src:
         dst_affine, dst_w, dst_h = plan_destination_grid(src, target)
         transformer = None if src.crs.equals(target) else make_transformer(target, src.crs)
@@ -80,43 +83,47 @@ def reproject_geotiff(
         n_ty = (dst_h + tile - 1) // tile
         n_tx = (dst_w + tile - 1) // tile
         total = max(1, n_ty * n_tx)
+        coords = [(ty, tx) for ty in range(n_ty) for tx in range(n_tx)]
         done = 0
+
+        def _compute_tile(coord: tuple[int, int]) -> np.ndarray:
+            ty, tx = coord
+            r0 = ty * tile
+            c0 = tx * tile
+            sl_h = min(tile, dst_h - r0)
+            sl_w = min(tile, dst_w - c0)
+            warped = warp_window(
+                src,
+                dst_affine,
+                target,
+                r0,
+                c0,
+                sl_h,
+                sl_w,
+                resampling,
+                add_alpha=add_alpha,
+                white_as_transparent=white_as_transparent,
+                transformer=transformer,
+            )
+            if warped.shape[2] < out_samples:
+                padded = np.zeros((sl_h, sl_w, out_samples), dtype=np.uint8)
+                padded[:, :, : warped.shape[2]] = warped
+                if out_samples in {2, 4} and warped.shape[2] not in {2, 4}:
+                    padded[:, :, -1] = 255
+                warped = padded
+            elif warped.shape[2] > out_samples:
+                warped = warped[:, :, :out_samples]
+            full = np.zeros((tile, tile, out_samples), dtype=np.uint8)
+            full[:sl_h, :sl_w] = warped
+            return full
 
         def tiles() -> Iterator[np.ndarray]:
             nonlocal done
-            for ty in range(n_ty):
-                for tx in range(n_tx):
-                    r0 = ty * tile
-                    c0 = tx * tile
-                    sl_h = min(tile, dst_h - r0)
-                    sl_w = min(tile, dst_w - c0)
-                    warped = warp_window(
-                        src,
-                        dst_affine,
-                        target,
-                        r0,
-                        c0,
-                        sl_h,
-                        sl_w,
-                        resampling,
-                        add_alpha=add_alpha,
-                        white_as_transparent=white_as_transparent,
-                        transformer=transformer,
-                    )
-                    if warped.shape[2] < out_samples:
-                        padded = np.zeros((sl_h, sl_w, out_samples), dtype=np.uint8)
-                        padded[:, :, : warped.shape[2]] = warped
-                        if out_samples in {2, 4} and warped.shape[2] not in {2, 4}:
-                            padded[:, :, -1] = 255
-                        warped = padded
-                    elif warped.shape[2] > out_samples:
-                        warped = warped[:, :, :out_samples]
-                    full = np.zeros((tile, tile, out_samples), dtype=np.uint8)
-                    full[:sl_h, :sl_w] = warped
-                    done += 1
-                    if on_progress is not None:
-                        on_progress(100.0 * done / total, "reproject")
-                    yield full
+            for full in ordered_parallel_map(coords, _compute_tile, workers=thread_count):
+                done += 1
+                if on_progress is not None:
+                    on_progress(100.0 * done / total, "reproject")
+                yield full
 
         write_geotiff_tiled(
             output_path,

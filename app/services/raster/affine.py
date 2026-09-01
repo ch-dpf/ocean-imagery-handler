@@ -61,6 +61,9 @@ class Affine:
             f=self.f,
         )
 
+    def is_north_up(self, tol: float = 1e-8) -> bool:
+        return abs(self.b) <= tol and abs(self.d) <= tol and abs(self.a) > tol and abs(self.e) > tol
+
     @property
     def pixel_width(self) -> float:
         return float(np.hypot(self.a, self.d))

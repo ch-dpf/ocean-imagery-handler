@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import threading
 from collections import OrderedDict
-from collections.abc import Iterator
+from collections.abc import Hashable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -39,19 +40,55 @@ def _as_int(value: object) -> int | None:
             return None
 
 
+@dataclass(frozen=True, slots=True)
+class RasterLevel:
+    """One resolution of a GeoTIFF (full image or overview page)."""
+
+    scale: int
+    page: tifffile.TiffPage
+    affine: Affine
+    width: int
+    height: int
+    tile_w: int
+    tile_h: int
+    tiles_across: int
+
+
+def _level_from_page(page: tifffile.TiffPage, scale: int, affine: Affine) -> RasterLevel:
+    width = int(page.imagewidth)
+    height = int(page.imagelength)
+    tile_w = int(page.tilewidth or width)
+    tile_h = int(page.tilelength or (page.rowsperstrip or height))
+    if tile_w <= 0:
+        tile_w = width
+    if tile_h <= 0:
+        tile_h = height
+    tiles_across = max(1, (width + tile_w - 1) // tile_w)
+    return RasterLevel(
+        scale=scale,
+        page=page,
+        affine=affine,
+        width=width,
+        height=height,
+        tile_w=tile_w,
+        tile_h=tile_h,
+        tiles_across=tiles_across,
+    )
+
+
 class _TileCache:
     def __init__(self, max_bytes: int) -> None:
         self.max_bytes = max(int(max_bytes), 1)
-        self._data: OrderedDict[int, np.ndarray] = OrderedDict()
+        self._data: OrderedDict[Hashable, np.ndarray] = OrderedDict()
         self._nbytes = 0
 
-    def get(self, key: int) -> np.ndarray | None:
+    def get(self, key: Hashable) -> np.ndarray | None:
         array = self._data.get(key)
         if array is not None:
             self._data.move_to_end(key)
         return array
 
-    def put(self, key: int, array: np.ndarray) -> None:
+    def put(self, key: Hashable, array: np.ndarray) -> None:
         nbytes = int(array.nbytes)
         if key in self._data:
             self._nbytes -= int(self._data[key].nbytes)
@@ -214,13 +251,10 @@ class GeoTiffReader:
             self.height = int(self._page.imagelength)
             self.samples = int(self._page.samplesperpixel or 1)
             self.dtype = np.dtype(self._page.dtype)
-            self._tile_w = int(self._page.tilewidth or self.width)
-            self._tile_h = int(self._page.tilelength or (self._page.rowsperstrip or self.height))
-            if self._tile_w <= 0:
-                self._tile_w = self.width
-            if self._tile_h <= 0:
-                self._tile_h = self.height
-            self._tiles_across = max(1, (self.width + self._tile_w - 1) // self._tile_w)
+            self._base = _level_from_page(self._page, 1, self.affine)
+            self._tile_w = self._base.tile_w
+            self._tile_h = self._base.tile_h
+            self._tiles_across = self._base.tiles_across
             self._lock = threading.Lock()
             self._cache = _TileCache(cache_bytes)
             self._full: np.ndarray | None = None
@@ -231,7 +265,7 @@ class GeoTiffReader:
                     self._full = _normalize_hwc(array, self.samples)
                 except Exception:
                     self._full = None
-            self._overviews: list[tuple[int, tifffile.TiffPage, Affine]] = []
+            self._overviews: list[RasterLevel] = []
             self._load_overviews()
         except Exception:
             self.close()
@@ -239,25 +273,42 @@ class GeoTiffReader:
 
     def _load_overviews(self) -> None:
         for page in list(self._tif.pages)[1:]:
-            self._maybe_add_overview(page, self.affine)
+            self._maybe_add_overview(page)
         ovr_path = Path(str(self.path) + ".ovr")
         if ovr_path.is_file():
             try:
                 self._ovr_tif = tifffile.TiffFile(ovr_path)
             except Exception:
                 self._ovr_tif = None
-                return
-            for page in self._ovr_tif.pages:
-                self._maybe_add_overview(page, self.affine)
+            else:
+                for page in self._ovr_tif.pages:
+                    self._maybe_add_overview(page)
+        self._overviews.sort(key=lambda level: level.scale)
 
-    def _maybe_add_overview(self, page: tifffile.TiffPage, base: Affine) -> None:
+    def _maybe_add_overview(self, page: tifffile.TiffPage) -> None:
         width = int(page.imagewidth)
         if width <= 0 or width >= self.width:
             return
         scale = max(1, int(round(self.width / width)))
         if scale <= 1:
             return
-        self._overviews.append((scale, page, base.scaled(scale)))
+        self._overviews.append(_level_from_page(page, scale, self.affine.scaled(scale)))
+
+    @property
+    def overview_scales(self) -> list[int]:
+        return [level.scale for level in self._overviews]
+
+    def select_level(self, col_span: float, row_span: float, dst_w: int, dst_h: int) -> RasterLevel:
+        """Pick the coarsest overview that still has >= ~1 source pixel per dest pixel."""
+        px_per_dst = min(col_span / max(dst_w, 1), row_span / max(dst_h, 1))
+        desired = max(1.0, px_per_dst)
+        chosen = self._base
+        for level in self._overviews:
+            if level.scale <= desired + 0.5:
+                chosen = level
+            else:
+                break
+        return chosen
 
     @property
     def bounds(self) -> tuple[float, float, float, float]:
@@ -303,44 +354,51 @@ class GeoTiffReader:
         decoded = page.decode(blob, index)[0]
         return _normalize_hwc(decoded, self.samples)
 
-    def _get_tile(self, ty: int, tx: int) -> np.ndarray:
-        index = ty * self._tiles_across + tx
-        cached = self._cache.get(index)
-        if cached is not None:
-            return cached
+    def _get_tile(self, level: RasterLevel, ty: int, tx: int) -> np.ndarray:
+        index = ty * level.tiles_across + tx
+        key = (id(level.page), index)
         with self._lock:
-            cached = self._cache.get(index)
+            cached = self._cache.get(key)
             if cached is not None:
                 return cached
-            array = self._decode_index(self._page, index)
-            self._cache.put(index, array)
+            array = self._decode_index(level.page, index)
+            self._cache.put(key, array)
             return array
 
-    def read_window(self, row0: int, col0: int, height: int, width: int) -> np.ndarray:
+    def read_window(
+        self,
+        row0: int,
+        col0: int,
+        height: int,
+        width: int,
+        *,
+        level: RasterLevel | None = None,
+    ) -> np.ndarray:
         """Return (height, width, samples) filled with zeros outside the image."""
+        lvl = level or self._base
         out = np.zeros((height, width, self.samples), dtype=self.dtype)
         img_r0 = max(0, row0)
         img_c0 = max(0, col0)
-        img_r1 = min(self.height, row0 + height)
-        img_c1 = min(self.width, col0 + width)
+        img_r1 = min(lvl.height, row0 + height)
+        img_c1 = min(lvl.width, col0 + width)
         if img_r0 >= img_r1 or img_c0 >= img_c1:
             return out
 
-        if self._full is not None:
+        if lvl.scale == 1 and self._full is not None:
             out[img_r0 - row0 : img_r1 - row0, img_c0 - col0 : img_c1 - col0] = self._full[
                 img_r0:img_r1, img_c0:img_c1
             ]
             return out
 
-        tile_r0 = img_r0 // self._tile_h
-        tile_r1 = (img_r1 - 1) // self._tile_h
-        tile_c0 = img_c0 // self._tile_w
-        tile_c1 = (img_c1 - 1) // self._tile_w
+        tile_r0 = img_r0 // lvl.tile_h
+        tile_r1 = (img_r1 - 1) // lvl.tile_h
+        tile_c0 = img_c0 // lvl.tile_w
+        tile_c1 = (img_c1 - 1) // lvl.tile_w
         for ty in range(tile_r0, tile_r1 + 1):
             for tx in range(tile_c0, tile_c1 + 1):
-                tile = self._get_tile(ty, tx)
-                y0 = ty * self._tile_h
-                x0 = tx * self._tile_w
+                tile = self._get_tile(lvl, ty, tx)
+                y0 = ty * lvl.tile_h
+                x0 = tx * lvl.tile_w
                 isy0 = max(img_r0, y0)
                 isx0 = max(img_c0, x0)
                 isy1 = min(img_r1, y0 + tile.shape[0])

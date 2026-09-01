@@ -17,6 +17,7 @@ dependencies = [
     "tifffile>=2024.8.30",
     "imagecodecs>=2024.6.1",
     "pyproj>=3.6.1",
+    "opencv-python-headless>=4.8.0",
 ]
 
 [project.optional-dependencies]

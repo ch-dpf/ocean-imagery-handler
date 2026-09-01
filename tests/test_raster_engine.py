@@ -52,3 +52,68 @@ def test_sample_bilinear_identity():
     cols = np.array([[0.0, 1.0], [0.0, 1.0]])
     out = sample_bilinear(src, rows, cols)
     np.testing.assert_allclose(out[:, :, 0], [[10, 20], [30, 40]], atol=1e-5)
+
+
+def test_remap_and_same_crs_warp(tmp_path: Path):
+    from app.services.raster.resample import remap_image
+    from app.services.raster.warp import warp_window
+
+    src_arr = np.arange(16 * 16 * 3, dtype=np.uint8).reshape(16, 16, 3)
+    path = tmp_path / "src.tif"
+    affine = Affine.north_up(0.0, 16.0, 1.0, 1.0)
+    write_geotiff_array(path, src_arr, affine=affine, crs=CRS.from_epsg(4326), block_size=16)
+    yy, xx = np.mgrid[0:16, 0:16].astype(np.float32)
+    remapped = remap_image(src_arr, xx + 0.5, yy + 0.5, "bilinear")
+    np.testing.assert_array_equal(remapped, src_arr)
+
+    with GeoTiffReader(path) as src:
+        out = warp_window(
+            src,
+            affine,
+            CRS.from_epsg(4326),
+            0,
+            0,
+            16,
+            16,
+            "bilinear",
+            add_alpha=False,
+        )
+    assert out.shape[0] == 16 and out.shape[1] == 16
+    np.testing.assert_allclose(out[:, :, :3].astype(np.float32), src_arr.astype(np.float32), atol=1)
+
+
+def test_ordered_parallel_map_preserves_order():
+    from app.services.raster.parallel import ordered_parallel_map, run_unordered
+
+    doubled = list(ordered_parallel_map(range(24), lambda value: value * 2, workers=4))
+    assert doubled == [value * 2 for value in range(24)]
+
+    seen: list[int] = []
+    run_unordered(range(10), seen.append, workers=3)
+    assert sorted(seen) == list(range(10))
+
+
+def test_overviews_used_for_coarse_warp(tmp_path: Path):
+    from app.services.raster.overviews import add_overviews
+    from app.services.raster.warp import warp_window
+
+    height = width = 64
+    data = np.zeros((height, width, 3), dtype=np.uint8)
+    data[:, :, 0] = np.arange(width, dtype=np.uint8)[None, :]
+    data[:, :, 1] = np.arange(height, dtype=np.uint8)[:, None]
+    data[:, :, 2] = 80
+    path = tmp_path / "src.tif"
+    affine = Affine.north_up(0.0, float(height), 1.0, 1.0)
+    write_geotiff_array(path, data, affine=affine, crs=CRS.from_epsg(4326), block_size=16)
+    assert add_overviews(path, levels=(2, 4), block_size=16, workers=2) is not None
+
+    with GeoTiffReader(path) as src:
+        assert src.overview_scales == [2, 4]
+        assert src.select_level(8, 8, 8, 8).scale == 1
+        assert src.select_level(64, 64, 8, 8).scale == 4
+        dst_affine = Affine.north_up(0.0, float(height), 8.0, 8.0)
+        out = warp_window(src, dst_affine, CRS.from_epsg(4326), 0, 0, 8, 8, "bilinear")
+        assert out.shape[:2] == (8, 8)
+        assert out[0, -1, 0] > out[0, 0, 0]
+        assert out[-1, 0, 1] > out[0, 0, 1]
+        np.testing.assert_allclose(out[:, :, 2].astype(np.float32), 80, atol=2)

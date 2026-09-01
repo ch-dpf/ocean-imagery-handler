@@ -12,12 +12,14 @@ from app.services.raster.resample import (
     RESAMPLE_CUBIC,
     RESAMPLE_LANCZOS,
     normalize_resampling,
+    remap_image,
     resize_array,
-    sample_image,
     to_uint8,
+    upsample2d,
 )
 
 _MAX_SOURCE_WINDOW = 4096
+_SPARSE_STEP = 8
 
 
 def _pad_for_method(method: str) -> int:
@@ -53,6 +55,67 @@ def _apply_alpha(
     return np.concatenate([rgb, alpha[:, :, np.newaxis]], axis=2)
 
 
+def _north_up_colrow_maps(
+    src_affine: Affine,
+    dst_affine: Affine,
+    dst_row0: int,
+    dst_col0: int,
+    dst_h: int,
+    dst_w: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    col_1d = (
+        dst_affine.a * (np.arange(dst_w, dtype=np.float64) + dst_col0 + 0.5) + dst_affine.c - src_affine.c
+    ) / src_affine.a
+    row_1d = (
+        dst_affine.e * (np.arange(dst_h, dtype=np.float64) + dst_row0 + 0.5) + dst_affine.f - src_affine.f
+    ) / src_affine.e
+    return np.meshgrid(col_1d, row_1d)
+
+
+def _src_colrow_maps(
+    src: GeoTiffReader,
+    dst_affine: Affine,
+    dst_crs: CRS,
+    dst_row0: int,
+    dst_col0: int,
+    dst_h: int,
+    dst_w: int,
+    transformer: Transformer | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    if crs_equal(src.crs, dst_crs) and src.affine.is_north_up() and dst_affine.is_north_up():
+        return _north_up_colrow_maps(src.affine, dst_affine, dst_row0, dst_col0, dst_h, dst_w)
+
+    use_sparse = dst_h >= 32 and dst_w >= 32
+    if use_sparse:
+        n_r = max(2, dst_h // _SPARSE_STEP + 1)
+        n_c = max(2, dst_w // _SPARSE_STEP + 1)
+        row_s = np.linspace(dst_row0 + 0.5, dst_row0 + dst_h - 0.5, n_r)
+        col_s = np.linspace(dst_col0 + 0.5, dst_col0 + dst_w - 0.5, n_c)
+        rows, cols = np.meshgrid(row_s, col_s, indexing="ij")
+    else:
+        rows, cols = np.meshgrid(
+            np.arange(dst_h, dtype=np.float64) + dst_row0 + 0.5,
+            np.arange(dst_w, dtype=np.float64) + dst_col0 + 0.5,
+            indexing="ij",
+        )
+
+    dst_x, dst_y = dst_affine.xy(cols, rows)
+    if crs_equal(src.crs, dst_crs):
+        src_x = np.asarray(dst_x, dtype=np.float64)
+        src_y = np.asarray(dst_y, dtype=np.float64)
+    else:
+        xform = transformer or make_transformer(dst_crs, src.crs)
+        src_x, src_y = transform_xy(xform, np.asarray(dst_x, dtype=np.float64), np.asarray(dst_y, dtype=np.float64))
+
+    src_cols, src_rows = src.affine.colrow(src_x, src_y)
+    src_cols = np.asarray(src_cols, dtype=np.float64)
+    src_rows = np.asarray(src_rows, dtype=np.float64)
+    if use_sparse:
+        src_cols = upsample2d(src_cols, dst_h, dst_w)
+        src_rows = upsample2d(src_rows, dst_h, dst_w)
+    return src_cols, src_rows
+
+
 def warp_window(
     src: GeoTiffReader,
     dst_affine: Affine,
@@ -68,33 +131,36 @@ def warp_window(
     transformer: Transformer | None = None,
 ) -> np.ndarray:
     """Warp a destination window to uint8 HWC, optionally with alpha."""
-    rows, cols = np.meshgrid(
-        np.arange(dst_row0, dst_row0 + dst_h, dtype=np.float64) + 0.5,
-        np.arange(dst_col0, dst_col0 + dst_w, dtype=np.float64) + 0.5,
-        indexing="ij",
+    src_cols, src_rows = _src_colrow_maps(
+        src, dst_affine, dst_crs, dst_row0, dst_col0, dst_h, dst_w, transformer
     )
-    dst_x, dst_y = dst_affine.xy(cols, rows)
-    if crs_equal(src.crs, dst_crs):
-        src_x = np.asarray(dst_x, dtype=np.float64)
-        src_y = np.asarray(dst_y, dtype=np.float64)
-    else:
-        xform = transformer or make_transformer(dst_crs, src.crs)
-        src_x, src_y = transform_xy(xform, np.asarray(dst_x, dtype=np.float64), np.asarray(dst_y, dtype=np.float64))
-
-    src_cols, src_rows = src.affine.colrow(src_x, src_y)
-    src_cols = np.asarray(src_cols, dtype=np.float64)
-    src_rows = np.asarray(src_rows, dtype=np.float64)
     finite = np.isfinite(src_cols) & np.isfinite(src_rows)
     inside = finite & (src_cols >= 0) & (src_cols < src.width) & (src_rows >= 0) & (src_rows < src.height)
 
-    out_bands = src.samples
+    out_bands = min(src.samples, 4)
     empty = np.zeros((dst_h, dst_w, out_bands), dtype=np.uint8)
     if not np.any(inside):
-        return _apply_alpha(empty, inside, add_alpha=add_alpha, white_as_transparent=white_as_transparent, source_alpha=None)
+        return _apply_alpha(
+            empty, inside, add_alpha=add_alpha, white_as_transparent=white_as_transparent, source_alpha=None
+        )
 
     pad = _pad_for_method(resampling)
     finite_rows = src_rows[finite]
     finite_cols = src_cols[finite]
+    level = src.select_level(
+        float(finite_cols.max() - finite_cols.min()),
+        float(finite_rows.max() - finite_rows.min()),
+        dst_w,
+        dst_h,
+    )
+    if level.scale != 1:
+        sx = level.width / src.width
+        sy = level.height / src.height
+        src_cols = src_cols * sx
+        src_rows = src_rows * sy
+        finite_rows = src_rows[finite]
+        finite_cols = src_cols[finite]
+
     rmin = int(np.floor(finite_rows.min())) - pad
     rmax = int(np.ceil(finite_rows.max())) + pad + 1
     cmin = int(np.floor(finite_cols.min())) - pad
@@ -106,22 +172,27 @@ def warp_window(
         scale = max(win_h / _MAX_SOURCE_WINDOW, win_w / _MAX_SOURCE_WINDOW)
         scaled_h = max(1, int(round(win_h / scale)))
         scaled_w = max(1, int(round(win_w / scale)))
-        window = src.read_window(rmin, cmin, win_h, win_w)
-        window = resize_array(to_uint8(window), scaled_h, scaled_w, "average")
-        rel_rows = (src_rows - rmin) / scale
-        rel_cols = (src_cols - cmin) / scale
+        window = resize_array(
+            to_uint8(src.read_window(rmin, cmin, win_h, win_w, level=level)),
+            scaled_h,
+            scaled_w,
+            "average",
+        )
+        rel_x = (src_cols - cmin) / scale
+        rel_y = (src_rows - rmin) / scale
     else:
-        window = to_uint8(src.read_window(rmin, cmin, win_h, win_w))
-        rel_rows = src_rows - rmin
-        rel_cols = src_cols - cmin
+        window = to_uint8(src.read_window(rmin, cmin, win_h, win_w, level=level))
+        rel_x = src_cols - cmin
+        rel_y = src_rows - rmin
 
-    sampled = sample_image(window, rel_rows, rel_cols, resampling)
-    rgb = np.clip(np.rint(sampled), 0, 255).astype(np.uint8)
+    rgb = remap_image(window, rel_x, rel_y, resampling)
     source_alpha = rgb[:, :, -1] if rgb.shape[2] in {2, 4} else None
-    color = rgb[:, :, :3] if rgb.shape[2] >= 3 else rgb
     if rgb.shape[2] in {2, 4}:
         color = rgb[:, :, :-1]
-        source_alpha = rgb[:, :, -1]
+    elif rgb.shape[2] >= 3:
+        color = rgb[:, :, :3]
+    else:
+        color = rgb
     return _apply_alpha(
         color if color.ndim == 3 else color[:, :, np.newaxis],
         inside,
