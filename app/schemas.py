@@ -47,13 +47,13 @@ class TileScheme(str, Enum):
 class PreprocessOptions(BaseModel):
     target_crs: str = Field(
         default="EPSG:3857",
-        description="Target CRS for gdal raster reproject (EPSG:3857 recommended for Cesium Web Mercator)",
+        description="Target CRS for reprojection (EPSG:3857 recommended for Cesium Web Mercator)",
     )
-    build_overviews: bool = Field(default=True, description="Build overviews with gdal raster overview add")
+    build_overviews: bool = Field(default=True, description="Build reduced-resolution GeoTIFF overviews")
     block_size: int = Field(
         default=256,
         ge=16,
-        description="GDAL TIFF BLOCKXSIZE/BLOCKYSIZE; must be a multiple of 16",
+        description="GeoTIFF tile BLOCKXSIZE/BLOCKYSIZE; must be a multiple of 16",
     )
     compress: str = Field(default="DEFLATE", description="GeoTIFF compression: DEFLATE, LZW, or JPEG (JPEG cannot keep alpha)")
     jpeg_quality: int = Field(default=85, ge=1, le=100, description="JPEG quality when compress=JPEG")
@@ -63,7 +63,7 @@ class PreprocessOptions(BaseModel):
     )
     white_as_transparent: bool = Field(
         default=False,
-        description="Treat exact white RGB(255,255,255) fill as transparent during gdal raster reproject",
+        description="Treat exact white RGB(255,255,255) fill as transparent during reprojection",
     )
     near_white: int = Field(
         default=0,
@@ -100,7 +100,7 @@ class TilingOptions(BaseModel):
     thread_count: int | None = Field(
         default=None,
         ge=1,
-        description="Parallel jobs for gdal raster tile (-j); defaults to TILING_THREAD_COUNT",
+        description="Parallel jobs for tile generation; defaults to TILING_THREAD_COUNT",
     )
     resume: bool | None = Field(
         default=None,

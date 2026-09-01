@@ -1,0 +1,132 @@
+"""Reproject a GeoTIFF to a target CRS (replacement for ``gdal raster reproject``)."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterator
+from pathlib import Path
+
+import numpy as np
+from pyproj import CRS
+
+from app.services.raster.affine import Affine
+from app.services.raster.crsutil import (
+    WEB_MERCATOR_MAX_LAT,
+    crs_epsg,
+    estimate_destination_pixel_size,
+    make_transformer,
+    parse_crs,
+    transform_bounds,
+)
+from app.services.raster.errors import RasterError
+from app.services.raster.geotiff import GeoTiffReader, write_geotiff_tiled
+from app.services.raster.warp import warp_window
+
+ProgressFn = Callable[[float, str | None], None]
+
+
+def plan_destination_grid(
+    src: GeoTiffReader,
+    dst_crs: CRS,
+) -> tuple[Affine, int, int]:
+    src_bounds = src.bounds
+    if crs_epsg(dst_crs) == 3857:
+        wgs84 = parse_crs("EPSG:4326")
+        west, south, east, north = transform_bounds(src.crs, wgs84, src_bounds)
+        south = max(south, -WEB_MERCATOR_MAX_LAT)
+        north = min(north, WEB_MERCATOR_MAX_LAT)
+        left, bottom, right, top = transform_bounds(wgs84, dst_crs, (west, south, east, north))
+    else:
+        left, bottom, right, top = transform_bounds(src.crs, dst_crs, src_bounds)
+    if not np.isfinite([left, bottom, right, top]).all() or right <= left or top <= bottom:
+        raise RasterError("Destination extent is empty after reprojection")
+    px, py = estimate_destination_pixel_size(src.crs, dst_crs, src.affine, src.width, src.height)
+    width = max(1, int(round((right - left) / px)))
+    height = max(1, int(round((top - bottom) / py)))
+    if width > 2_000_000 or height > 2_000_000:
+        raise RasterError(f"Destination raster too large: {width}x{height}")
+    affine = Affine.north_up(left, top, (right - left) / width, (top - bottom) / height)
+    return affine, width, height
+
+
+def reproject_geotiff(
+    input_path: Path,
+    output_path: Path,
+    *,
+    dst_crs: str | CRS,
+    compress: str,
+    block_size: int,
+    jpeg_quality: int,
+    add_alpha: bool,
+    white_as_transparent: bool,
+    cache_bytes: int,
+    resampling: str = "bilinear",
+    on_progress: ProgressFn | None = None,
+) -> None:
+    target = parse_crs(dst_crs)
+    with GeoTiffReader(input_path, cache_bytes=cache_bytes) as src:
+        dst_affine, dst_w, dst_h = plan_destination_grid(src, target)
+        transformer = None if src.crs.equals(target) else make_transformer(target, src.crs)
+        src_samples = min(src.samples, 4)
+        if src_samples >= 4:
+            out_samples = 4
+        elif src_samples == 2:
+            out_samples = 2
+        elif add_alpha or white_as_transparent:
+            out_samples = src_samples + 1
+        else:
+            out_samples = src_samples
+
+        tile = block_size
+        n_ty = (dst_h + tile - 1) // tile
+        n_tx = (dst_w + tile - 1) // tile
+        total = max(1, n_ty * n_tx)
+        done = 0
+
+        def tiles() -> Iterator[np.ndarray]:
+            nonlocal done
+            for ty in range(n_ty):
+                for tx in range(n_tx):
+                    r0 = ty * tile
+                    c0 = tx * tile
+                    sl_h = min(tile, dst_h - r0)
+                    sl_w = min(tile, dst_w - c0)
+                    warped = warp_window(
+                        src,
+                        dst_affine,
+                        target,
+                        r0,
+                        c0,
+                        sl_h,
+                        sl_w,
+                        resampling,
+                        add_alpha=add_alpha,
+                        white_as_transparent=white_as_transparent,
+                        transformer=transformer,
+                    )
+                    if warped.shape[2] < out_samples:
+                        padded = np.zeros((sl_h, sl_w, out_samples), dtype=np.uint8)
+                        padded[:, :, : warped.shape[2]] = warped
+                        if out_samples in {2, 4} and warped.shape[2] not in {2, 4}:
+                            padded[:, :, -1] = 255
+                        warped = padded
+                    elif warped.shape[2] > out_samples:
+                        warped = warped[:, :, :out_samples]
+                    full = np.zeros((tile, tile, out_samples), dtype=np.uint8)
+                    full[:sl_h, :sl_w] = warped
+                    done += 1
+                    if on_progress is not None:
+                        on_progress(100.0 * done / total, "reproject")
+                    yield full
+
+        write_geotiff_tiled(
+            output_path,
+            tiles(),
+            shape=(dst_h, dst_w, out_samples),
+            affine=dst_affine,
+            crs=target,
+            compress=compress,
+            block_size=block_size,
+            jpeg_quality=jpeg_quality,
+        )
+    if on_progress is not None:
+        on_progress(100.0, "reproject complete")

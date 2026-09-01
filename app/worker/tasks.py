@@ -198,7 +198,7 @@ def process_imagery_job(self, job_id: str, request_data: dict) -> dict:
         reporter.begin_stage(
             "gdal_preprocess",
             status=JobStatus.PREPROCESSING,
-            message="Running GDAL preprocess",
+            message="Running raster preprocess",
         )
         preprocessed = preprocess_imagery(
             input_path=input_path,

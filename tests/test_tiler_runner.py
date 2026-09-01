@@ -1,120 +1,77 @@
-"""gdal raster tile command builder tests."""
+"""Python raster tile tests (no GDAL CLI)."""
 
 from pathlib import Path
 
-import pytest
-
 from app.schemas import ResamplingMethod, TileProfile, TileScheme, TilingOptions
-from app.services.tiler_runner import GDAL_BIN, build_raster_tile_command
+from app.services.preprocessor import preprocess_imagery
+from app.schemas import PreprocessOptions
+from app.services.tiler_runner import PROFILE_TO_TILING_SCHEME, RESAMPLING_TO_GDAL, run_raster_tile
+from tests.raster_fixtures import write_rgb_geotiff_4326
 
 
-def test_build_raster_tile_command_zoom_range():
-    if GDAL_BIN is None:
-        pytest.skip("gdal CLI not installed")
+def test_resampling_and_profile_maps():
+    assert PROFILE_TO_TILING_SCHEME[TileProfile.MERCATOR] == "WebMercatorQuad"
+    assert PROFILE_TO_TILING_SCHEME[TileProfile.GEODETIC] == "WorldCRS84Quad"
+    assert RESAMPLING_TO_GDAL[ResamplingMethod.ANTIALIAS] == "lanczos"
+    assert RESAMPLING_TO_GDAL[ResamplingMethod.NEAREST] == "nearest"
 
-    cmd = build_raster_tile_command(
-        Path("/data/input.tif"),
-        Path("/data/output"),
-        TilingOptions(profile=TileProfile.MERCATOR, start_zoom=18, end_zoom=0, thread_count=4),
+
+def test_run_raster_tile_mercator_xyz(tmp_path: Path):
+    source = write_rgb_geotiff_4326(
+        tmp_path / "src.tif",
+        width=64,
+        height=64,
+        west=116.3,
+        north=39.95,
+        pixel_deg=0.0005,
     )
-    assert cmd[:3] == [GDAL_BIN, "raster", "tile"]
-    assert "--tiling-scheme" in cmd
-    assert cmd[cmd.index("--tiling-scheme") + 1] == "WebMercatorQuad"
-    assert "--min-zoom" in cmd
-    assert cmd[cmd.index("--min-zoom") + 1] == "0"
-    assert "--max-zoom" in cmd
-    assert cmd[cmd.index("--max-zoom") + 1] == "18"
-    assert "--format" in cmd
-    assert "PNG" in cmd
-    assert "--convention" in cmd
-    assert cmd[cmd.index("--convention") + 1] == "xyz"
-    assert "-j" in cmd
-    assert cmd[cmd.index("-j") + 1] == "4"
-    assert "--webviewer" in cmd
-    assert cmd[cmd.index("--webviewer") + 1] == "none"
-    assert "-q" in cmd
-
-
-def test_build_raster_tile_command_tms_convention():
-    if GDAL_BIN is None:
-        pytest.skip("gdal CLI not installed")
-
-    cmd = build_raster_tile_command(
-        Path("/data/input.tif"),
-        Path("/data/output"),
-        TilingOptions(profile=TileProfile.MERCATOR, tile_scheme=TileScheme.TMS),
+    preprocessed = preprocess_imagery(
+        source,
+        tmp_path / "prep",
+        PreprocessOptions(target_crs="EPSG:3857", build_overviews=False, add_alpha=True, block_size=32),
+        gdal_cachemax=64,
     )
-    assert cmd[cmd.index("--convention") + 1] == "tms"
-
-
-def test_build_raster_tile_command_auto_zoom():
-    if GDAL_BIN is None:
-        pytest.skip("gdal CLI not installed")
-
-    cmd = build_raster_tile_command(
-        Path("/data/input.tif"),
-        Path("/data/output"),
-        TilingOptions(profile=TileProfile.MERCATOR),
-    )
-    assert "--min-zoom" in cmd
-    assert cmd[cmd.index("--min-zoom") + 1] == "0"
-    assert "--max-zoom" not in cmd
-
-
-def test_build_raster_tile_command_auto_max_with_custom_min_zoom():
-    if GDAL_BIN is None:
-        pytest.skip("gdal CLI not installed")
-
-    cmd = build_raster_tile_command(
-        Path("/data/input.tif"),
-        Path("/data/output"),
-        TilingOptions(profile=TileProfile.MERCATOR, end_zoom=10),
-    )
-    assert cmd[cmd.index("--min-zoom") + 1] == "10"
-    assert "--max-zoom" not in cmd
-
-
-def test_build_raster_tile_command_geodetic_and_resampling_map():
-    if GDAL_BIN is None:
-        pytest.skip("gdal CLI not installed")
-
-    cmd = build_raster_tile_command(
-        Path("/data/input.tif"),
-        Path("/data/output"),
+    tiles_dir = tmp_path / "tiles"
+    run_raster_tile(
+        preprocessed,
+        tiles_dir,
         TilingOptions(
-            profile=TileProfile.GEODETIC,
-            resampling_method=ResamplingMethod.NEAREST,
-            resume=True,
-            verbose=True,
+            profile=TileProfile.MERCATOR,
+            tile_scheme=TileScheme.XYZ,
+            start_zoom=12,
+            end_zoom=11,
+            thread_count=1,
         ),
+        gdal_cachemax=64,
     )
-    assert cmd[cmd.index("--tiling-scheme") + 1] == "WorldCRS84Quad"
-    assert cmd[cmd.index("-r") + 1] == "nearest"
-    assert "--resume" in cmd
-    assert "-q" not in cmd
+    zoom_dirs = [p for p in tiles_dir.iterdir() if p.is_dir() and p.name.isdigit()]
+    assert {p.name for p in zoom_dirs} >= {"11", "12"}
+    pngs = list(tiles_dir.rglob("*.png"))
+    assert pngs
+    assert all(p.stat().st_size > 0 for p in pngs)
 
 
-def test_build_raster_tile_command_show_progress():
-    if GDAL_BIN is None:
-        pytest.skip("gdal CLI not installed")
-
-    cmd = build_raster_tile_command(
-        Path("/data/input.tif"),
-        Path("/data/output"),
-        TilingOptions(),
-        show_progress=True,
+def test_run_raster_tile_tms_and_kml(tmp_path: Path):
+    source = write_rgb_geotiff_4326(tmp_path / "src.tif", width=48, height=48)
+    preprocessed = preprocess_imagery(
+        source,
+        tmp_path / "prep",
+        PreprocessOptions(target_crs="EPSG:3857", build_overviews=False, block_size=16),
+        gdal_cachemax=32,
     )
-    assert "--progress" in cmd
-    assert "-q" not in cmd
-
-
-def test_build_raster_tile_command_antialias_maps_to_lanczos():
-    if GDAL_BIN is None:
-        pytest.skip("gdal CLI not installed")
-
-    cmd = build_raster_tile_command(
-        Path("/data/input.tif"),
-        Path("/data/output"),
-        TilingOptions(resampling_method=ResamplingMethod.ANTIALIAS),
+    tiles_dir = tmp_path / "tiles"
+    run_raster_tile(
+        preprocessed,
+        tiles_dir,
+        TilingOptions(
+            profile=TileProfile.MERCATOR,
+            tile_scheme=TileScheme.TMS,
+            start_zoom=10,
+            end_zoom=10,
+            kml=True,
+            thread_count=1,
+        ),
+        gdal_cachemax=32,
     )
-    assert cmd[cmd.index("-r") + 1] == "lanczos"
+    assert (tiles_dir / "doc.kml").is_file()
+    assert list((tiles_dir / "10").rglob("*.png"))
