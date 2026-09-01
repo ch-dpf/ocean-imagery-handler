@@ -9,6 +9,7 @@ import redis
 
 from app.config import Settings
 from app.schemas import JobStatus
+from app.services.job_events import job_events_channel
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,12 @@ class JobStore:
     def _key(self, job_id: str) -> str:
         return f"{self._prefix}{job_id}"
 
+    def _publish(self, job_id: str, data: dict[str, Any]) -> None:
+        try:
+            self._redis.publish(job_events_channel(job_id), json.dumps(data))
+        except redis.RedisError:
+            logger.warning("Failed to publish job update for %s", job_id, exc_info=True)
+
     def create(self, job_id: str, payload: dict[str, Any]) -> None:
         now = datetime.now(UTC).isoformat()
         data = {
@@ -49,6 +56,7 @@ class JobStore:
             **payload,
         }
         self._redis.setex(self._key(job_id), self._ttl, json.dumps(data))
+        self._publish(job_id, data)
 
     def update(self, job_id: str, **fields: Any) -> None:
         try:
@@ -61,6 +69,7 @@ class JobStore:
         data.update(fields)
         data["updated_at"] = datetime.now(UTC).isoformat()
         self._redis.setex(self._key(job_id), self._ttl, json.dumps(data))
+        self._publish(job_id, data)
 
     def overwrite(self, job_id: str, **fields: Any) -> None:
         """Replace job metadata without reading the existing Redis value."""
@@ -73,6 +82,7 @@ class JobStore:
         if "created_at" not in data:
             data["created_at"] = now
         self._redis.setex(self._key(job_id), self._ttl, json.dumps(data))
+        self._publish(job_id, data)
 
     def get(self, job_id: str) -> dict[str, Any] | None:
         raw = self._redis.get(self._key(job_id))

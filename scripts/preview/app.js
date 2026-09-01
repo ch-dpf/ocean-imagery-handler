@@ -3,6 +3,7 @@
 
   const API_BASE = "/api/v1/imagery";
   const POLL_INTERVAL_MS = 2000;
+  const WS_CONNECT_TIMEOUT_MS = 5000;
 
   if (typeof Cesium.Ion !== "undefined") {
     Cesium.Ion.defaultAccessToken = undefined;
@@ -29,6 +30,8 @@
   let currentLng = "—";
   let currentZoom = "—";
   let pollTimer = null;
+  let jobSocket = null;
+  let trackingJobId = null;
   let activePanel = null;
   let activeSubmitTab = "upload";
   let workspaceRelativePath = "";
@@ -337,11 +340,149 @@
     }
   }
 
-  function stopPolling() {
+  function stopJobTracking() {
+    trackingJobId = null;
     if (pollTimer) {
       clearInterval(pollTimer);
       pollTimer = null;
     }
+    if (jobSocket) {
+      jobSocket.close();
+      jobSocket = null;
+    }
+  }
+
+  function isTerminalJobStatus(status) {
+    return status === "completed" || status === "failed";
+  }
+
+  function jobWebSocketUrl(jobId) {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return (
+      protocol +
+      "//" +
+      window.location.host +
+      API_BASE +
+      "/jobs/" +
+      encodeURIComponent(jobId) +
+      "/ws"
+    );
+  }
+
+  function handleJobQueryError(err) {
+    stopJobTracking();
+    clearJobProgress();
+    const hintEl = document.getElementById("jobQueryHint");
+    if (hintEl) {
+      hintEl.hidden = false;
+      hintEl.className = "error-text";
+      hintEl.textContent = "查询失败: " + err.message;
+    }
+    updatePublishControls(null);
+  }
+
+  function onJobProgressUpdate(job, jobId) {
+    renderJobDetail(job);
+
+    if (!isTerminalJobStatus(job.status)) {
+      return;
+    }
+
+    stopJobTracking();
+    if (job.status === "completed") {
+      showToast("任务已完成: " + jobId, "success");
+      refreshTilesets();
+      return;
+    }
+
+    showToast("任务失败: " + (job.error || jobId), "error");
+  }
+
+  function startPollingFallback(jobId) {
+    if (pollTimer || trackingJobId !== jobId) {
+      return;
+    }
+
+    async function tick() {
+      try {
+        const job = await fetchJob(jobId);
+        onJobProgressUpdate(job, jobId);
+      } catch (err) {
+        handleJobQueryError(err);
+      }
+    }
+
+    tick();
+    pollTimer = setInterval(tick, POLL_INTERVAL_MS);
+  }
+
+  function startJobTracking(jobId) {
+    stopJobTracking();
+    trackingJobId = jobId;
+    setJobIdFields(jobId);
+
+    if (typeof WebSocket === "undefined") {
+      startPollingFallback(jobId);
+      return;
+    }
+
+    const socket = new WebSocket(jobWebSocketUrl(jobId));
+    jobSocket = socket;
+    let connectTimer = null;
+
+    function clearConnectTimer() {
+      if (connectTimer) {
+        clearTimeout(connectTimer);
+        connectTimer = null;
+      }
+    }
+
+    socket.onopen = function () {
+      clearConnectTimer();
+    };
+
+    socket.onmessage = function (event) {
+      try {
+        const job = JSON.parse(event.data);
+        onJobProgressUpdate(job, jobId);
+      } catch (err) {
+        showToast("进度消息解析失败: " + err.message, "error");
+      }
+    };
+
+    socket.onerror = function () {
+      clearConnectTimer();
+    };
+
+    socket.onclose = function () {
+      clearConnectTimer();
+      if (jobSocket === socket) {
+        jobSocket = null;
+      }
+      if (trackingJobId !== jobId) {
+        return;
+      }
+
+      const terminal =
+        lastJobDetail &&
+        lastJobDetail.job_id === jobId &&
+        isTerminalJobStatus(lastJobDetail.status);
+      if (!terminal) {
+        startPollingFallback(jobId);
+      }
+    };
+
+    connectTimer = setTimeout(function () {
+      if (
+        trackingJobId === jobId &&
+        jobSocket === socket &&
+        socket.readyState !== WebSocket.OPEN &&
+        !pollTimer
+      ) {
+        socket.close();
+        startPollingFallback(jobId);
+      }
+    }, WS_CONNECT_TIMEOUT_MS);
   }
 
   function statusBadgeClass(status) {
@@ -508,37 +649,7 @@
   }
 
   function startPolling(jobId) {
-    stopPolling();
-    setJobIdFields(jobId);
-
-    async function tick() {
-      try {
-        const job = await fetchJob(jobId);
-        renderJobDetail(job);
-
-        if (job.status === "completed") {
-          stopPolling();
-          showToast("任务已完成: " + jobId, "success");
-          refreshTilesets();
-        } else if (job.status === "failed") {
-          stopPolling();
-          showToast("任务失败: " + (job.error || jobId), "error");
-        }
-      } catch (err) {
-        stopPolling();
-        clearJobProgress();
-        const hintEl = document.getElementById("jobQueryHint");
-        if (hintEl) {
-          hintEl.hidden = false;
-          hintEl.className = "error-text";
-          hintEl.textContent = "查询失败: " + err.message;
-        }
-        updatePublishControls(null);
-      }
-    }
-
-    tick();
-    pollTimer = setInterval(tick, POLL_INTERVAL_MS);
+    startJobTracking(jobId);
   }
 
   async function lookupJob() {
