@@ -129,7 +129,11 @@
 
   function updateUrlTileset(name) {
     const url = new URL(window.location.href);
-    url.searchParams.set("tileset", name);
+    if (name) {
+      url.searchParams.set("tileset", name);
+    } else {
+      url.searchParams.delete("tileset");
+    }
     window.history.replaceState({}, "", url.toString());
   }
 
@@ -263,9 +267,23 @@
       urlEl.className = "url";
       urlEl.textContent = item.imagery_url || item.url_template || "";
 
+      const actionsEl = document.createElement("div");
+      actionsEl.className = "tileset-actions";
+
+      const unpublishBtn = document.createElement("button");
+      unpublishBtn.type = "button";
+      unpublishBtn.className = "secondary";
+      unpublishBtn.textContent = "下架";
+      unpublishBtn.addEventListener("click", function (event) {
+        event.stopPropagation();
+        unpublishTileset(item.name);
+      });
+      actionsEl.appendChild(unpublishBtn);
+
       li.appendChild(nameEl);
       li.appendChild(urlEl);
       li.appendChild(renderTilesetMeta(item));
+      li.appendChild(actionsEl);
       li.addEventListener("click", function () {
         loadTileset(item.name, { flyTo: true })
           .then(function () {
@@ -279,6 +297,31 @@
 
       listEl.appendChild(li);
     });
+  }
+
+  async function unpublishTileset(tilesetName) {
+    if (!tilesetName) return;
+    if (!window.confirm('确认下架图层 "' + tilesetName + '"？')) {
+      return;
+    }
+
+    try {
+      await apiFetch("/tilesets/" + encodeURIComponent(tilesetName), {
+        method: "DELETE",
+      });
+
+      if (currentTileset === tilesetName) {
+        removeOverlayLayer();
+        currentTileset = null;
+        updateUrlTileset(null);
+        setStatus("图层已下架: " + tilesetName);
+      }
+
+      showToast("已下架: " + tilesetName, "success");
+      await refreshTilesets();
+    } catch (err) {
+      showToast("下架失败: " + err.message, "error");
+    }
   }
 
   async function refreshTilesets() {
