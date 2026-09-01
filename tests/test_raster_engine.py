@@ -117,3 +117,25 @@ def test_overviews_used_for_coarse_warp(tmp_path: Path):
         assert out[0, -1, 0] > out[0, 0, 0]
         assert out[-1, 0, 1] > out[0, 0, 1]
         np.testing.assert_allclose(out[:, :, 2].astype(np.float32), 80, atol=2)
+        assert src.select_level(28, 28, 8, 8).scale == 2
+
+
+def test_destination_grid_and_zoom_are_formula_based():
+    import math
+
+    from app.services.raster.crsutil import EARTH_HALF, destination_pixel_size, grid_dimension
+    from app.services.raster.tiles import auto_max_zoom_mercator
+
+    affine = Affine.north_up(0.0, 10.0, 0.1, 0.1)
+    px, py = destination_pixel_size(CRS.from_epsg(4326), CRS.from_epsg(3857), affine, 20, 10)
+    assert px > 0 and py > 0
+    assert grid_dimension(10.0, 2.0) == 5
+    assert grid_dimension(10.0, 3.0) == 4
+    ratio = (2 * EARTH_HALF) / (px * 256)
+    assert auto_max_zoom_mercator(px, 256) == max(0, math.ceil(math.log2(ratio) - 1e-12))
+
+
+def test_north_up_requires_exact_zero_shear():
+    assert Affine.north_up(0.0, 1.0, 1.0, 1.0).is_north_up()
+    tilted = Affine(a=1.0, b=1e-12, c=0.0, d=0.0, e=-1.0, f=1.0)
+    assert not tilted.is_north_up()

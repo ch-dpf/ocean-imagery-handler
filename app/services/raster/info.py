@@ -6,25 +6,19 @@ from pathlib import Path
 
 from pyproj import CRS
 
-from app.services.raster.crsutil import densify_rect, make_transformer, transform_xy, wgs84_bounds_from_rect
+from app.services.raster.crsutil import transform_ring, wgs84_bounds_from_rect
 from app.services.raster.geotiff import GeoTiffReader
 
 
 def raster_info_json(dataset: Path, cache_bytes: int = 64 * 1024 * 1024) -> dict:
     with GeoTiffReader(dataset, cache_bytes=cache_bytes) as src:
-        left, bottom, right, top = src.bounds
         ul = src.affine.xy(0, 0)
         ur = src.affine.xy(src.width, 0)
         lr = src.affine.xy(src.width, src.height)
         ll = src.affine.xy(0, src.height)
         cx, cy = src.affine.xy(src.width / 2.0, src.height / 2.0)
         west, south, east, north = wgs84_bounds_from_rect(src.crs, src.bounds)
-        xs, ys = densify_rect(left, bottom, right, top)
-        transformer = make_transformer(src.crs, CRS.from_epsg(4326))
-        lon, lat = transform_xy(transformer, xs, ys)
-        ring = [[float(x), float(y)] for x, y in zip(lon, lat) if np_isfinite(x) and np_isfinite(y)]
-        if ring and ring[0] != ring[-1]:
-            ring.append(ring[0])
+        ring = transform_ring(src.crs, CRS.from_epsg(4326), src.bounds)
         return {
             "size": [src.width, src.height],
             "bands": [{"band": i + 1, "colorInterp": _color_interp(src.samples, i)} for i in range(src.samples)],
@@ -40,15 +34,6 @@ def raster_info_json(dataset: Path, cache_bytes: int = 64 * 1024 * 1024) -> dict
             "wgs84Extent": {"type": "Polygon", "coordinates": [ring] if ring else []},
             "wgs84Bounds": [west, south, east, north],
         }
-
-
-def np_isfinite(value: object) -> bool:
-    try:
-        import math
-
-        return math.isfinite(float(value))  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return False
 
 
 def _color_interp(samples: int, index: int) -> str:

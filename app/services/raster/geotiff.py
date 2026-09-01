@@ -271,6 +271,17 @@ class GeoTiffReader:
             self.close()
             raise
 
+    def _affine_for_size(self, width: int, height: int) -> Affine:
+        """Affine for a page covering the same extent with ``width``×``height`` pixels."""
+        return Affine(
+            a=self.affine.a * (self.width / width),
+            b=self.affine.b * (self.height / height),
+            c=self.affine.c,
+            d=self.affine.d * (self.width / width),
+            e=self.affine.e * (self.height / height),
+            f=self.affine.f,
+        )
+
     def _load_overviews(self) -> None:
         for page in list(self._tif.pages)[1:]:
             self._maybe_add_overview(page)
@@ -283,28 +294,29 @@ class GeoTiffReader:
             else:
                 for page in self._ovr_tif.pages:
                     self._maybe_add_overview(page)
-        self._overviews.sort(key=lambda level: level.scale)
+        self._overviews.sort(key=lambda level: self.width / level.width)
 
     def _maybe_add_overview(self, page: tifffile.TiffPage) -> None:
         width = int(page.imagewidth)
-        if width <= 0 or width >= self.width:
+        height = int(page.imagelength)
+        if width <= 0 or height <= 0 or width >= self.width or height >= self.height:
             return
-        scale = max(1, int(round(self.width / width)))
-        if scale <= 1:
-            return
-        self._overviews.append(_level_from_page(page, scale, self.affine.scaled(scale)))
+        scale = max(1, self.width // width)
+        self._overviews.append(_level_from_page(page, scale, self._affine_for_size(width, height)))
 
     @property
     def overview_scales(self) -> list[int]:
         return [level.scale for level in self._overviews]
 
     def select_level(self, col_span: float, row_span: float, dst_w: int, dst_h: int) -> RasterLevel:
-        """Pick the coarsest overview that still has >= ~1 source pixel per dest pixel."""
-        px_per_dst = min(col_span / max(dst_w, 1), row_span / max(dst_h, 1))
-        desired = max(1.0, px_per_dst)
+        """Coarsest overview whose pixel is not larger than the destination pixel."""
+        px_x = col_span / max(dst_w, 1)
+        px_y = row_span / max(dst_h, 1)
         chosen = self._base
         for level in self._overviews:
-            if level.scale <= desired + 0.5:
+            scale_x = self.width / level.width
+            scale_y = self.height / level.height
+            if scale_x <= px_x and scale_y <= px_y:
                 chosen = level
             else:
                 break

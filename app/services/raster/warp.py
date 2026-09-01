@@ -13,13 +13,8 @@ from app.services.raster.resample import (
     RESAMPLE_LANCZOS,
     normalize_resampling,
     remap_image,
-    resize_array,
     to_uint8,
-    upsample2d,
 )
-
-_MAX_SOURCE_WINDOW = 4096
-_SPARSE_STEP = 8
 
 
 def _pad_for_method(method: str) -> int:
@@ -85,19 +80,11 @@ def _src_colrow_maps(
     if crs_equal(src.crs, dst_crs) and src.affine.is_north_up() and dst_affine.is_north_up():
         return _north_up_colrow_maps(src.affine, dst_affine, dst_row0, dst_col0, dst_h, dst_w)
 
-    use_sparse = dst_h >= 32 and dst_w >= 32
-    if use_sparse:
-        n_r = max(2, dst_h // _SPARSE_STEP + 1)
-        n_c = max(2, dst_w // _SPARSE_STEP + 1)
-        row_s = np.linspace(dst_row0 + 0.5, dst_row0 + dst_h - 0.5, n_r)
-        col_s = np.linspace(dst_col0 + 0.5, dst_col0 + dst_w - 0.5, n_c)
-        rows, cols = np.meshgrid(row_s, col_s, indexing="ij")
-    else:
-        rows, cols = np.meshgrid(
-            np.arange(dst_h, dtype=np.float64) + dst_row0 + 0.5,
-            np.arange(dst_w, dtype=np.float64) + dst_col0 + 0.5,
-            indexing="ij",
-        )
+    rows, cols = np.meshgrid(
+        np.arange(dst_h, dtype=np.float64) + dst_row0 + 0.5,
+        np.arange(dst_w, dtype=np.float64) + dst_col0 + 0.5,
+        indexing="ij",
+    )
 
     dst_x, dst_y = dst_affine.xy(cols, rows)
     if crs_equal(src.crs, dst_crs):
@@ -108,12 +95,7 @@ def _src_colrow_maps(
         src_x, src_y = transform_xy(xform, np.asarray(dst_x, dtype=np.float64), np.asarray(dst_y, dtype=np.float64))
 
     src_cols, src_rows = src.affine.colrow(src_x, src_y)
-    src_cols = np.asarray(src_cols, dtype=np.float64)
-    src_rows = np.asarray(src_rows, dtype=np.float64)
-    if use_sparse:
-        src_cols = upsample2d(src_cols, dst_h, dst_w)
-        src_rows = upsample2d(src_rows, dst_h, dst_w)
-    return src_cols, src_rows
+    return np.asarray(src_cols, dtype=np.float64), np.asarray(src_rows, dtype=np.float64)
 
 
 def warp_window(
@@ -153,7 +135,7 @@ def warp_window(
         dst_w,
         dst_h,
     )
-    if level.scale != 1:
+    if level.width != src.width or level.height != src.height:
         sx = level.width / src.width
         sy = level.height / src.height
         src_cols = src_cols * sx
@@ -167,23 +149,9 @@ def warp_window(
     cmax = int(np.ceil(finite_cols.max())) + pad + 1
     win_h = max(1, rmax - rmin)
     win_w = max(1, cmax - cmin)
-
-    if win_h > _MAX_SOURCE_WINDOW or win_w > _MAX_SOURCE_WINDOW:
-        scale = max(win_h / _MAX_SOURCE_WINDOW, win_w / _MAX_SOURCE_WINDOW)
-        scaled_h = max(1, int(round(win_h / scale)))
-        scaled_w = max(1, int(round(win_w / scale)))
-        window = resize_array(
-            to_uint8(src.read_window(rmin, cmin, win_h, win_w, level=level)),
-            scaled_h,
-            scaled_w,
-            "average",
-        )
-        rel_x = (src_cols - cmin) / scale
-        rel_y = (src_rows - rmin) / scale
-    else:
-        window = to_uint8(src.read_window(rmin, cmin, win_h, win_w, level=level))
-        rel_x = src_cols - cmin
-        rel_y = src_rows - rmin
+    window = to_uint8(src.read_window(rmin, cmin, win_h, win_w, level=level))
+    rel_x = src_cols - cmin
+    rel_y = src_rows - rmin
 
     rgb = remap_image(window, rel_x, rel_y, resampling)
     source_alpha = rgb[:, :, -1] if rgb.shape[2] in {2, 4} else None

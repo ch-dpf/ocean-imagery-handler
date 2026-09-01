@@ -16,6 +16,7 @@ from app.services.raster.crsutil import (
     EARTH_HALF,
     WEB_MERCATOR_MAX_LAT,
     crs_epsg,
+    destination_pixel_size,
     make_transformer,
     parse_crs,
     wgs84_bounds_from_rect,
@@ -69,15 +70,19 @@ def geodetic_tile_bounds_4326(z: int, x: int, y: int) -> tuple[float, float, flo
 def auto_max_zoom_mercator(pixel_size_m: float, tile_size: int) -> int:
     if pixel_size_m <= 0:
         return 0
-    zoom = math.log2((2 * EARTH_HALF) / (pixel_size_m * tile_size))
-    return max(0, int(round(zoom)))
+    ratio = (2 * EARTH_HALF) / (pixel_size_m * tile_size)
+    if ratio <= 1.0:
+        return 0
+    return max(0, math.ceil(math.log2(ratio) - 1e-12))
 
 
 def auto_max_zoom_geodetic(pixel_size_deg: float, tile_size: int) -> int:
     if pixel_size_deg <= 0:
         return 0
-    zoom = math.log2(180.0 / (pixel_size_deg * tile_size))
-    return max(0, int(round(zoom)))
+    ratio = 180.0 / (pixel_size_deg * tile_size)
+    if ratio <= 1.0:
+        return 0
+    return max(0, math.ceil(math.log2(ratio) - 1e-12))
 
 
 def auto_max_zoom_raster(width: int, height: int, tile_size: int) -> int:
@@ -94,19 +99,20 @@ def compute_max_zoom(src: GeoTiffReader, options: TilingOptions) -> int:
         return auto_max_zoom_raster(src.width, src.height, options.tile_size)
     if options.profile == TileProfile.GEODETIC:
         if crs_epsg(src.crs) == 4326:
-            px = src.affine.pixel_width
+            px = min(src.affine.pixel_width, src.affine.pixel_height)
         else:
-            west, south, east, north = wgs84_bounds_from_rect(src.crs, src.bounds)
-            px = max((east - west) / src.width, (north - south) / src.height)
+            px, py = destination_pixel_size(
+                src.crs, parse_crs("EPSG:4326"), src.affine, src.width, src.height
+            )
+            px = min(px, py)
         return auto_max_zoom_geodetic(px, options.tile_size)
     if crs_epsg(src.crs) == 3857:
-        px = src.affine.pixel_width
+        px = min(src.affine.pixel_width, src.affine.pixel_height)
     else:
-        west, south, east, north = wgs84_bounds_from_rect(src.crs, src.bounds)
-        # Approximate meters/pixel at center latitude.
-        lat = (south + north) / 2.0
-        m_per_deg = math.cos(math.radians(lat)) * 2 * EARTH_HALF / 360.0
-        px = ((east - west) / src.width) * m_per_deg
+        px, py = destination_pixel_size(
+            src.crs, parse_crs("EPSG:3857"), src.affine, src.width, src.height
+        )
+        px = min(px, py)
     return auto_max_zoom_mercator(px, options.tile_size)
 
 
@@ -210,16 +216,14 @@ def _render_scheme_tile(
         col0 = x * src_tile
         row0 = y * src_tile
         level = src.select_level(float(src_tile), float(src_tile), tile_size, tile_size)
-        if level.scale > 1:
+        if level.width != src.width or level.height != src.height:
             sx = level.width / src.width
             sy = level.height / src.height
-            window = src.read_window(
-                int(row0 * sy),
-                int(col0 * sx),
-                max(1, int(round(src_tile * sy))),
-                max(1, int(round(src_tile * sx))),
-                level=level,
-            )
+            r0 = int(math.floor(row0 * sy))
+            c0 = int(math.floor(col0 * sx))
+            r1 = int(math.ceil((row0 + src_tile) * sy))
+            c1 = int(math.ceil((col0 + src_tile) * sx))
+            window = src.read_window(r0, c0, max(1, r1 - r0), max(1, c1 - c0), level=level)
         else:
             window = src.read_window(row0, col0, src_tile, src_tile)
         return resize_array(window, tile_size, tile_size, resampling)

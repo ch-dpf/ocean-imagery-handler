@@ -11,8 +11,14 @@ from pyproj.exceptions import CRSError, ProjError
 from app.services.raster.affine import Affine
 from app.services.raster.errors import RasterError
 
-WEB_MERCATOR_MAX_LAT = 85.05112878
-EARTH_HALF = 20037508.342789244  # WGS84 a * pi
+# Web Mercator (EPSG:3857) uses spherical formulas with WGS84 semi-major axis.
+WGS84_A = 6378137.0
+EARTH_HALF = WGS84_A * math.pi
+WEB_MERCATOR_MAX_LAT = math.degrees(math.atan(math.sinh(math.pi)))
+
+# Chord-error stop for adaptive boundary transform (relative to dest-space edge length).
+_CHORD_REL_TOL = 1e-12
+_MAX_EDGE_DEPTH = 16
 
 
 def parse_crs(value: str | CRS) -> CRS:
@@ -57,79 +63,176 @@ def transform_xy(
     return out_x, out_y
 
 
-def densify_rect(
+def _finite_pair(x: float, y: float) -> bool:
+    return math.isfinite(x) and math.isfinite(y)
+
+
+def _transform_point(transformer: Transformer, x: float, y: float) -> tuple[float, float]:
+    tx, ty = transform_xy(transformer, np.array([x], dtype=np.float64), np.array([y], dtype=np.float64))
+    return float(tx[0]), float(ty[0])
+
+
+def _axis_aligned_corners(
     left: float,
     bottom: float,
     right: float,
     top: float,
-    density: int = 21,
-) -> tuple[np.ndarray, np.ndarray]:
-    density = max(2, density)
-    edge = np.linspace(0.0, 1.0, density)
-    xs: list[np.ndarray] = []
-    ys: list[np.ndarray] = []
-    xs.append(left + edge * (right - left))
-    ys.append(np.full(density, bottom))
-    xs.append(np.full(density, right))
-    ys.append(bottom + edge * (top - bottom))
-    xs.append(left + edge * (right - left))
-    ys.append(np.full(density, top))
-    xs.append(np.full(density, left))
-    ys.append(bottom + edge * (top - bottom))
-    return np.concatenate(xs), np.concatenate(ys)
+) -> list[tuple[float, float]]:
+    return [(left, bottom), (right, bottom), (right, top), (left, top)]
+
+
+def _refine_edge(
+    transformer: Transformer,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    depth: int,
+) -> list[tuple[float, float]]:
+    """Split an edge until the dest-space midpoint lies on the chord, up to a numeric bound."""
+    t0 = _transform_point(transformer, x0, y0)
+    t1 = _transform_point(transformer, x1, y1)
+    mx = (x0 + x1) * 0.5
+    my = (y0 + y1) * 0.5
+    tm = _transform_point(transformer, mx, my)
+    if not (_finite_pair(*t0) and _finite_pair(*t1) and _finite_pair(*tm)):
+        return [t0, t1]
+    chord_x = (t0[0] + t1[0]) * 0.5
+    chord_y = (t0[1] + t1[1]) * 0.5
+    dist = math.hypot(tm[0] - chord_x, tm[1] - chord_y)
+    span = math.hypot(t1[0] - t0[0], t1[1] - t0[1])
+    if depth >= _MAX_EDGE_DEPTH or dist <= _CHORD_REL_TOL * max(span, 1.0):
+        return [t0, t1]
+    left_pts = _refine_edge(transformer, x0, y0, mx, my, depth + 1)
+    right_pts = _refine_edge(transformer, mx, my, x1, y1, depth + 1)
+    return left_pts[:-1] + right_pts
+
+
+def _aabb_from_points(points: list[tuple[float, float]]) -> tuple[float, float, float, float]:
+    finite = [(x, y) for x, y in points if _finite_pair(x, y)]
+    if not finite:
+        raise RasterError("Failed to transform raster bounds between CRS")
+    xs = [p[0] for p in finite]
+    ys = [p[1] for p in finite]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _mercator_pair(source: CRS, target: CRS) -> bool:
+    a, b = crs_epsg(source), crs_epsg(target)
+    return a in {4326, 3857} and b in {4326, 3857} and a != b
 
 
 def transform_bounds(
     source: CRS,
     target: CRS,
     bounds: tuple[float, float, float, float],
-    *,
-    density: int = 21,
 ) -> tuple[float, float, float, float]:
-    """Return (left, bottom, right, top) in ``target`` CRS."""
+    """Return (left, bottom, right, top) in ``target`` CRS.
+
+    Axis-aligned rectangles in EPSG:4326 or EPSG:3857 map to each other with
+    extrema at the four corners (x is linear in longitude, y is monotonic in
+    latitude). Other CRS pairs refine each edge until the dest-space chord error
+    is within floating-point tolerance.
+    """
     left, bottom, right, top = bounds
     if crs_equal(source, target):
         return left, bottom, right, top
     transformer = make_transformer(source, target)
-    xs, ys = densify_rect(left, bottom, right, top, density)
-    tx, ty = transform_xy(transformer, xs, ys)
-    finite = np.isfinite(tx) & np.isfinite(ty)
-    if not np.any(finite):
-        raise RasterError("Failed to transform raster bounds between CRS")
-    return float(np.min(tx[finite])), float(np.min(ty[finite])), float(np.max(tx[finite])), float(np.max(ty[finite]))
+    corners = _axis_aligned_corners(left, bottom, right, top)
+    if _mercator_pair(source, target):
+        points = [_transform_point(transformer, x, y) for x, y in corners]
+        return _aabb_from_points(points)
+
+    points: list[tuple[float, float]] = []
+    closed = corners + [corners[0]]
+    for (x0, y0), (x1, y1) in zip(closed, closed[1:]):
+        edge = _refine_edge(transformer, x0, y0, x1, y1, 0)
+        if points:
+            points.extend(edge[1:])
+        else:
+            points.extend(edge)
+    return _aabb_from_points(points)
+
+
+def transform_ring(
+    source: CRS,
+    target: CRS,
+    bounds: tuple[float, float, float, float],
+) -> list[list[float]]:
+    """Closed boundary ring in ``target`` CRS."""
+    left, bottom, right, top = bounds
+    if crs_equal(source, target):
+        ring = [[left, bottom], [right, bottom], [right, top], [left, top], [left, bottom]]
+        return ring
+    transformer = make_transformer(source, target)
+    corners = _axis_aligned_corners(left, bottom, right, top)
+    closed = corners + [corners[0]]
+    if _mercator_pair(source, target):
+        points = [_transform_point(transformer, x, y) for x, y in closed]
+    else:
+        points = []
+        for (x0, y0), (x1, y1) in zip(closed, closed[1:]):
+            edge = _refine_edge(transformer, x0, y0, x1, y1, 0)
+            if points:
+                points.extend(edge[1:])
+            else:
+                points.extend(edge)
+    ring = [[x, y] for x, y in points if _finite_pair(x, y)]
+    if ring and ring[0] != ring[-1]:
+        ring.append(ring[0])
+    return ring
 
 
 def clip_mercator_lat(lat: float) -> float:
     return min(max(lat, -WEB_MERCATOR_MAX_LAT), WEB_MERCATOR_MAX_LAT)
 
 
-def estimate_destination_pixel_size(
+def destination_pixel_size(
     src_crs: CRS,
     dst_crs: CRS,
     src_affine: Affine,
     width: int,
     height: int,
 ) -> tuple[float, float]:
-    """Approximate destination pixel size from a source pixel at the raster center."""
-    col = max(width * 0.5, 0.0)
-    row = max(height * 0.5, 0.0)
-    x0, y0 = src_affine.xy(col, row)
-    x1, y1 = src_affine.xy(col + 1.0, row)
-    x2, y2 = src_affine.xy(col, row + 1.0)
-    if crs_equal(src_crs, dst_crs):
-        dx = math.hypot(float(x1) - float(x0), float(y1) - float(y0))
-        dy = math.hypot(float(x2) - float(x0), float(y2) - float(y0))
-        return max(dx, 1e-12), max(dy, 1e-12)
+    """Dest-CRS size of one source pixel, taking the finest of the four corners.
 
-    transformer = make_transformer(src_crs, dst_crs)
-    pts_x = np.array([x0, x1, x2], dtype=np.float64)
-    pts_y = np.array([y0, y1, y2], dtype=np.float64)
-    tx, ty = transform_xy(transformer, pts_x, pts_y)
-    if not np.all(np.isfinite(tx) & np.isfinite(ty)):
-        return src_affine.pixel_width, src_affine.pixel_height
-    dx = math.hypot(float(tx[1] - tx[0]), float(ty[1] - ty[0]))
-    dy = math.hypot(float(tx[2] - tx[0]), float(ty[2] - ty[0]))
-    return max(dx, 1e-12), max(dy, 1e-12)
+    An affine maps a rectangle to a parallelogram, so latitude/longitude extrema
+    (and typically GSD extrema under common map projections) occur at vertices.
+    Using the minimum avoids undersampling; it is not a center-pixel guess.
+    """
+    corners = (
+        (0.0, 0.0),
+        (float(width), 0.0),
+        (float(width), float(height)),
+        (0.0, float(height)),
+    )
+    dxs: list[float] = []
+    dys: list[float] = []
+    transformer = None if crs_equal(src_crs, dst_crs) else make_transformer(src_crs, dst_crs)
+    for col, row in corners:
+        x0, y0 = src_affine.xy(col, row)
+        x1, y1 = src_affine.xy(col + 1.0, row)
+        x2, y2 = src_affine.xy(col, row + 1.0)
+        xs = np.array([x0, x1, x2], dtype=np.float64)
+        ys = np.array([y0, y1, y2], dtype=np.float64)
+        if transformer is None:
+            tx, ty = xs, ys
+        else:
+            tx, ty = transform_xy(transformer, xs, ys)
+        if not np.all(np.isfinite(tx) & np.isfinite(ty)):
+            continue
+        dxs.append(math.hypot(float(tx[1] - tx[0]), float(ty[1] - ty[0])))
+        dys.append(math.hypot(float(tx[2] - tx[0]), float(ty[2] - ty[0])))
+    if not dxs or not dys:
+        raise RasterError("Failed to measure destination pixel size")
+    return min(dxs), min(dys)
+
+
+def grid_dimension(span: float, pixel_size: float) -> int:
+    """Pixel count covering ``span`` at ``pixel_size`` without undersampling."""
+    if span <= 0 or pixel_size <= 0:
+        raise RasterError("Destination span and pixel size must be positive")
+    return max(1, math.ceil(span / pixel_size - 1e-12))
 
 
 def wgs84_bounds_from_rect(
@@ -141,6 +244,4 @@ def wgs84_bounds_from_rect(
     east = min(max(right, -180.0), 180.0)
     south = min(max(bottom, -90.0), 90.0)
     north = min(max(top, -90.0), 90.0)
-    if west >= east or south >= north:
-        return [west, south, east, north]
     return [west, south, east, north]

@@ -48,7 +48,7 @@ def write_doc_kml(
 ) -> None:
     """Write a lightweight GroundOverlay KML for the listed XYZ tiles."""
     overlays: list[str] = []
-    for z, x, y in tiles[:512]:
+    for z, x, y in tiles:
         file_y = y if scheme == "xyz" else (2**z - 1 - y)
         href = f"{z}/{x}/{file_y}.{ext}"
         if profile == "geodetic":

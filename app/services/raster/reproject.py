@@ -12,7 +12,8 @@ from app.services.raster.affine import Affine
 from app.services.raster.crsutil import (
     WEB_MERCATOR_MAX_LAT,
     crs_epsg,
-    estimate_destination_pixel_size,
+    destination_pixel_size,
+    grid_dimension,
     make_transformer,
     parse_crs,
     transform_bounds,
@@ -40,9 +41,9 @@ def plan_destination_grid(
         left, bottom, right, top = transform_bounds(src.crs, dst_crs, src_bounds)
     if not np.isfinite([left, bottom, right, top]).all() or right <= left or top <= bottom:
         raise RasterError("Destination extent is empty after reprojection")
-    px, py = estimate_destination_pixel_size(src.crs, dst_crs, src.affine, src.width, src.height)
-    width = max(1, int(round((right - left) / px)))
-    height = max(1, int(round((top - bottom) / py)))
+    px, py = destination_pixel_size(src.crs, dst_crs, src.affine, src.width, src.height)
+    width = grid_dimension(right - left, px)
+    height = grid_dimension(top - bottom, py)
     if width > 2_000_000 or height > 2_000_000:
         raise RasterError(f"Destination raster too large: {width}x{height}")
     affine = Affine.north_up(left, top, (right - left) / width, (top - bottom) / height)
