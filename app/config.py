@@ -24,8 +24,6 @@ class Settings(BaseSettings):
     workspace_dir: Path = Path("/data/workspace")
     gdal_cachemax: int = 512
     job_ttl: int = 604800
-    progress_calibration_min_samples: int = 3
-    progress_calibration_ema_alpha: float = 0.25
 
     imagery_server_public_url: str = "http://localhost:8102"
     imagery_base_path: str = "/imagery"

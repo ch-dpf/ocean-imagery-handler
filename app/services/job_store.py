@@ -86,5 +86,4 @@ class JobStore:
 
     @property
     def redis(self):
-        """Expose Redis client for auxiliary stores (e.g. progress calibration)."""
         return self._redis

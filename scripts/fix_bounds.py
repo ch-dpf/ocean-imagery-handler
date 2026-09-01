@@ -2,30 +2,10 @@
 """Fix tile.json bounds that were stored as EPSG:3857 metres."""
 
 import json
-import subprocess
 import sys
 from pathlib import Path
 
-
-def wgs84_bounds(dataset: Path) -> list[float]:
-    result = subprocess.run(
-        ["gdal", "raster", "info", "--format", "JSON", str(dataset)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr)
-
-    data = json.loads(result.stdout)
-    extent = data.get("wgs84Extent") or {}
-    ring = (extent.get("coordinates") or [[]])[0]
-    if not ring:
-        raise RuntimeError(f"No wgs84Extent for {dataset}")
-
-    lons = [float(p[0]) for p in ring]
-    lats = [float(p[1]) for p in ring]
-    return [min(lons), min(lats), max(lons), max(lats)]
+from app.services.preprocessor import parse_wgs84_bounds
 
 
 def fix_tile_json(tile_json: Path, bounds: list[float]) -> None:
@@ -55,7 +35,7 @@ def main() -> int:
         if not tile_json.is_file():
             print(f"Skip {job_id}: missing {tile_json}")
             continue
-        bounds = wgs84_bounds(dataset)
+        bounds = parse_wgs84_bounds(dataset)
         fix_tile_json(tile_json, bounds)
     return 0
 

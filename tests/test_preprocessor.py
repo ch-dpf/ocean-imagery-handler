@@ -1,111 +1,79 @@
-"""GDAL preprocess command builder tests."""
+"""Python raster preprocess tests (no GDAL CLI)."""
 
 from pathlib import Path
 
-import pytest
-
 from app.schemas import PreprocessOptions
-from app.services.preprocessor import (
-    GDAL_BIN,
-    build_overview_add_command,
-    build_raster_info_command,
-    build_reproject_command,
-)
+from app.services.preprocessor import gdal_info, parse_wgs84_bounds, preprocess_imagery
+from app.services.raster.geotiff import GeoTiffReader
+from tests.raster_fixtures import write_rgb_geotiff_4326
 
 
-def test_build_reproject_command_basic():
-    if GDAL_BIN is None:
-        pytest.skip("gdal CLI not installed")
-
-    cmd = build_reproject_command(
-        Path("/data/in.tif"),
-        Path("/data/warped.tif"),
-        PreprocessOptions(target_crs="EPSG:3857"),
+def test_parse_wgs84_bounds_from_epsg_4326(tmp_path: Path):
+    dataset = write_rgb_geotiff_4326(
+        tmp_path / "src.tif",
+        width=50,
+        height=40,
+        west=10.0,
+        north=50.0,
+        pixel_deg=0.01,
     )
-    assert cmd[:4] == [GDAL_BIN, "raster", "reproject", "--dst-crs"]
-    assert cmd[cmd.index("--dst-crs") + 1] == "EPSG:3857"
-    assert "-r" in cmd
-    assert cmd[cmd.index("-r") + 1] == "bilinear"
-    assert "--overwrite" in cmd
-    assert "--co" in cmd
-    assert "TILED=YES" in cmd
-    assert "BIGTIFF=IF_SAFER" in cmd
-    assert "--add-alpha" in cmd
-    assert cmd[-2:] == [str(Path("/data/in.tif")), str(Path("/data/warped.tif"))]
+    west, south, east, north = parse_wgs84_bounds(dataset)
+    assert west == 10.0
+    assert north == 50.0
+    assert abs(east - (10.0 + 50 * 0.01)) < 1e-6
+    assert abs(south - (50.0 - 40 * 0.01)) < 1e-6
 
 
-def test_build_reproject_command_white_as_transparent():
-    if GDAL_BIN is None:
-        pytest.skip("gdal CLI not installed")
+def test_gdal_info_text_contains_size(tmp_path: Path):
+    dataset = write_rgb_geotiff_4326(tmp_path / "src.tif", width=32, height=16)
+    text = gdal_info(dataset)
+    assert "Size is 32, 16" in text
+    assert "EPSG:4326" in text
 
-    cmd = build_reproject_command(
-        Path("/data/in.tif"),
-        Path("/data/warped.tif"),
-        PreprocessOptions(add_alpha=False, white_as_transparent=True),
+
+def test_preprocess_reprojects_to_3857_and_adds_alpha(tmp_path: Path):
+    source = write_rgb_geotiff_4326(tmp_path / "src.tif", width=32, height=32)
+    work = tmp_path / "work"
+    output = preprocess_imagery(
+        source,
+        work,
+        PreprocessOptions(
+            target_crs="EPSG:3857",
+            build_overviews=True,
+            add_alpha=True,
+            block_size=16,
+        ),
+        gdal_cachemax=64,
     )
-    assert "--add-alpha" in cmd
-    assert "--src-nodata" in cmd
-    assert cmd[cmd.index("--src-nodata") + 1] == "255 255 255"
+    assert output.name == "preprocessed.tif"
+    assert output.is_file()
+    assert Path(str(output) + ".ovr").is_file()
+    with GeoTiffReader(output) as dst:
+        assert dst.crs.to_epsg() == 3857
+        assert dst.samples == 4
+        assert dst.width > 0 and dst.height > 0
 
 
-def test_build_reproject_command_jpeg_compress_override():
-    if GDAL_BIN is None:
-        pytest.skip("gdal CLI not installed")
-
-    cmd = build_reproject_command(
-        Path("/data/in.tif"),
-        Path("/data/warped.tif"),
-        PreprocessOptions(compress="JPEG", add_alpha=False),
-        compress="DEFLATE",
+def test_white_as_transparent_sets_alpha_zero(tmp_path: Path):
+    source = write_rgb_geotiff_4326(
+        tmp_path / "white.tif",
+        width=16,
+        height=16,
+        color=(255, 255, 255),
     )
-    assert "COMPRESS=DEFLATE" in cmd
-
-
-def test_build_raster_info_command_text():
-    if GDAL_BIN is None:
-        pytest.skip("gdal CLI not installed")
-
-    cmd = build_raster_info_command(Path("/data/in.tif"))
-    assert cmd == [GDAL_BIN, "raster", "info", str(Path("/data/in.tif"))]
-
-
-def test_build_raster_info_command_json():
-    if GDAL_BIN is None:
-        pytest.skip("gdal CLI not installed")
-
-    cmd = build_raster_info_command(Path("/data/in.tif"), output_format="json")
-    assert cmd == [GDAL_BIN, "raster", "info", "--format", "JSON", str(Path("/data/in.tif"))]
-
-
-def test_build_overview_add_command():
-    if GDAL_BIN is None:
-        pytest.skip("gdal CLI not installed")
-
-    cmd = build_overview_add_command(Path("/data/warped.tif"))
-    assert cmd[:5] == [GDAL_BIN, "raster", "overview", "add", "-r"]
-    assert cmd[cmd.index("-r") + 1] == "average"
-    assert "--levels=2,4,8,16" in cmd
-    assert cmd[-1] == str(Path("/data/warped.tif"))
-    assert "--progress" not in cmd
-
-
-def test_build_reproject_command_show_progress():
-    if GDAL_BIN is None:
-        pytest.skip("gdal CLI not installed")
-
-    cmd = build_reproject_command(
-        Path("/data/in.tif"),
-        Path("/data/warped.tif"),
-        PreprocessOptions(),
-        show_progress=True,
+    output = preprocess_imagery(
+        source,
+        tmp_path / "work",
+        PreprocessOptions(
+            target_crs="EPSG:4326",
+            build_overviews=False,
+            add_alpha=False,
+            white_as_transparent=True,
+            block_size=16,
+        ),
+        gdal_cachemax=32,
     )
-    assert "--progress" in cmd
-
-
-def test_build_overview_add_command_show_progress():
-    if GDAL_BIN is None:
-        pytest.skip("gdal CLI not installed")
-
-    cmd = build_overview_add_command(Path("/data/warped.tif"), show_progress=True)
-    assert "--progress" in cmd
-    assert cmd[-2:] == ["--progress", str(Path("/data/warped.tif"))]
+    with GeoTiffReader(output) as dst:
+        window = dst.read_window(2, 2, 4, 4)
+        assert window.shape[2] == 4
+        assert int(window[:, :, 3].max()) == 0
