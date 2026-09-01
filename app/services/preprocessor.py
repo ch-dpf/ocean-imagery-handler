@@ -7,10 +7,13 @@ from collections.abc import Callable
 from pathlib import Path
 
 from app.schemas import PreprocessOptions
+from app.services.byte_progress import fraction_to_bytes, overview_bytes, raster_bytes
+from app.services.raster.crsutil import parse_crs
 from app.services.raster.errors import RasterError
+from app.services.raster.geotiff import GeoTiffReader
 from app.services.raster.info import raster_info_json, raster_info_text, wgs84_bounds
 from app.services.raster.overviews import add_overviews
-from app.services.raster.reproject import reproject_geotiff
+from app.services.raster.reproject import destination_sample_count, plan_destination_grid, reproject_geotiff
 
 logger = logging.getLogger(__name__)
 
@@ -124,14 +127,25 @@ def preprocess_imagery(
             options.near_white,
         )
 
-    warp_weight = 0.85 if options.build_overviews else 1.0
-    addo_weight = 0.15
+    try:
+        with GeoTiffReader(input_path, cache_bytes=cache_bytes) as src:
+            _, dst_w, dst_h = plan_destination_grid(src, parse_crs(options.target_crs))
+            samples = destination_sample_count(
+                src.samples,
+                add_alpha=options.add_alpha,
+                white_as_transparent=options.white_as_transparent,
+            )
+            reproject_b = raster_bytes(dst_w, dst_h, samples)
+            overview_b = overview_bytes(dst_w, dst_h, samples) if options.build_overviews else 0
+    except RasterError as exc:
+        raise PreprocessError(str(exc)) from exc
+    preprocess_bytes = max(1, reproject_b + overview_b)
 
     def _emit_reproject(sub_percent: float, message: str | None) -> None:
         if on_subprogress is None:
             return
-        scaled = sub_percent * warp_weight
-        on_subprogress(scaled, message or "reproject")
+        done = fraction_to_bytes(reproject_b, sub_percent)
+        on_subprogress(100.0 * done / preprocess_bytes, message or "reproject")
 
     try:
         reproject_geotiff(
@@ -155,8 +169,8 @@ def preprocess_imagery(
         def _emit_overview(sub_percent: float, message: str | None) -> None:
             if on_subprogress is None:
                 return
-            scaled = warp_weight * 100.0 + sub_percent * addo_weight
-            on_subprogress(min(scaled, 100.0), message or "overview add")
+            done = reproject_b + fraction_to_bytes(overview_b, sub_percent)
+            on_subprogress(min(100.0 * done / preprocess_bytes, 100.0), message or "overview add")
 
         try:
             add_overviews(

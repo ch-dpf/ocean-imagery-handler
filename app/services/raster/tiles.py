@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
-from pyproj import Transformer
+from pyproj import CRS, Transformer
 
 from app.schemas import TileFormat, TileProfile, TileScheme, TilingOptions
 from app.services.raster.affine import Affine
@@ -25,9 +26,38 @@ from app.services.raster.geotiff import GeoTiffReader
 from app.services.raster.kml import write_doc_kml
 from app.services.raster.parallel import default_workers, run_unordered
 from app.services.raster.resample import array_to_image, image_to_array, normalize_resampling, resize_array
+from app.services.raster.reproject import destination_sample_count
 from app.services.raster.warp import warp_window
 
 ProgressFn = Callable[[float, str | None], None]
+
+
+@dataclass(frozen=True, slots=True)
+class RasterExtent:
+    """CRS grid used to plan tiles without opening a GeoTIFF."""
+
+    crs: CRS
+    affine: Affine
+    width: int
+    height: int
+    samples: int = 3
+
+    @property
+    def bounds(self) -> tuple[float, float, float, float]:
+        xs: list[float] = []
+        ys: list[float] = []
+        for col, row in ((0, 0), (self.width, 0), (self.width, self.height), (0, self.height)):
+            x, y = self.affine.xy(col, row)
+            xs.append(float(x))
+            ys.append(float(y))
+        return min(xs), min(ys), max(xs), max(ys)
+
+
+def tile_sample_count(profile: TileProfile, dest_samples: int) -> int:
+    """uint8 bands produced for one output tile."""
+    if profile == TileProfile.RASTER:
+        return min(int(dest_samples), 4)
+    return destination_sample_count(dest_samples, add_alpha=True, white_as_transparent=False)
 
 
 def _tile_ext(fmt: TileFormat) -> str:
@@ -92,7 +122,7 @@ def auto_max_zoom_raster(width: int, height: int, tile_size: int) -> int:
     return max(0, math.ceil(math.log2(longest / tile_size)))
 
 
-def compute_max_zoom(src: GeoTiffReader, options: TilingOptions) -> int:
+def compute_max_zoom(src: GeoTiffReader | RasterExtent, options: TilingOptions) -> int:
     if options.start_zoom is not None:
         return options.start_zoom
     if options.profile == TileProfile.RASTER:
@@ -135,7 +165,7 @@ def _xyz_range_geodetic(bounds_wgs84: list[float], z: int) -> tuple[int, int, in
     return max(0, min(x0, x1)), min(n_x - 1, max(x0, x1)), max(0, min(y0, y1)), min(n_y - 1, max(y0, y1))
 
 
-def list_tiles(src: GeoTiffReader, options: TilingOptions, z: int) -> list[tuple[int, int]]:
+def list_tiles(src: GeoTiffReader | RasterExtent, options: TilingOptions, z: int) -> list[tuple[int, int]]:
     """Return XYZ (x, y) tiles intersecting the raster at zoom z."""
     if options.profile == TileProfile.RASTER:
         max_zoom = compute_max_zoom(src, options) if options.start_zoom is None else options.start_zoom
@@ -156,6 +186,14 @@ def list_tiles(src: GeoTiffReader, options: TilingOptions, z: int) -> list[tuple
     else:
         x0, x1, y0, y1 = _xyz_range_mercator(bounds, z)
     return [(x, y) for x in range(x0, x1 + 1) for y in range(y0, y1 + 1)]
+
+
+def count_output_tiles(src: GeoTiffReader | RasterExtent, options: TilingOptions) -> int:
+    min_zoom = options.end_zoom
+    max_zoom = compute_max_zoom(src, options)
+    if max_zoom < min_zoom:
+        max_zoom = min_zoom
+    return sum(len(list_tiles(src, options, z)) for z in range(min_zoom, max_zoom + 1))
 
 
 def _file_y(z: int, y_xyz: int, scheme: TileScheme) -> int:
@@ -306,19 +344,21 @@ def generate_tiles(
             max_zoom = min_zoom
 
         per_zoom: dict[int, list[tuple[int, int]]] = {}
-        total = 0
+        total_tiles = 0
         for z in range(min_zoom, max_zoom + 1):
             tiles = list_tiles(src, options, z)
             per_zoom[z] = tiles
-            total += len(tiles)
-        total = max(1, total)
-        done = 0
+            total_tiles += len(tiles)
+        tile_samples = tile_sample_count(options.profile, src.samples)
+        tile_bytes = options.tile_size * options.tile_size * tile_samples
+        planned_bytes = max(1, total_tiles * tile_bytes)
+        done_bytes = 0
 
         def _emit(z: int) -> None:
-            nonlocal done
-            done += 1
+            nonlocal done_bytes
+            done_bytes += tile_bytes
             if on_progress is not None:
-                on_progress(100.0 * done / total, f"Zoom {z}")
+                on_progress(100.0 * done_bytes / planned_bytes, f"Zoom {z}")
 
         dst_crs_3857 = parse_crs("EPSG:3857")
         dst_crs_4326 = parse_crs("EPSG:4326")

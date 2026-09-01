@@ -15,20 +15,17 @@ from app.schemas import JobProgress, JobStatus
 
 ProgressCallback = Callable[[JobProgress], None]
 
-# Overall pipeline ranges (start_percent, end_percent) keyed by worker stage.
-# Used as fallback when historical calibration is unavailable.
-DEFAULT_STAGE_RANGES: dict[str, tuple[float, float]] = {
-    "queued": (0.0, 0.0),
-    "initializing": (0.0, 2.0),
-    "gdal_preprocess": (2.0, 25.0),
-    "gdal_raster_tile": (25.0, 95.0),
-    "register_tileset": (95.0, 99.0),
-    "done": (100.0, 100.0),
-    "failed": (0.0, 100.0),
-}
 
-# Backward-compatible alias for tests and imports.
-STAGE_RANGES = DEFAULT_STAGE_RANGES
+def map_subprogress(
+    stage: str,
+    sub_percent: float,
+    stage_ranges: dict[str, tuple[float, float]] | None = None,
+) -> float:
+    """Map a 0-100 sub-step percent into an overall range (tests / leftover CLI)."""
+    ranges = stage_ranges or {}
+    start, end = ranges.get(stage, (0.0, 100.0))
+    clamped = min(max(sub_percent, 0.0), 100.0) / 100.0
+    return round(start + (end - start) * clamped, 2)
 
 _PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
 _DOT_STEP_RE = re.compile(r"(?:^|\.{3})(\d+)(?=\.{3}|$|\s|-)")
@@ -64,43 +61,28 @@ def parse_zoom_level(chunk: str) -> int | None:
     return int(match.group(1))
 
 
-def map_subprogress(
-    stage: str,
-    sub_percent: float,
-    stage_ranges: dict[str, tuple[float, float]] | None = None,
-) -> float:
-    """Map a 0-100 sub-step percent into the overall pipeline percent."""
-    ranges = stage_ranges or DEFAULT_STAGE_RANGES
-    start, end = ranges.get(stage, (0.0, 100.0))
-    clamped = min(max(sub_percent, 0.0), 100.0) / 100.0
-    return round(start + (end - start) * clamped, 2)
-
-
 @dataclass
 class JobProgressTracker:
-    """Tracks overall job progress across pipeline stages."""
+    """Tracks overall job progress as uncompressed raster bytes written / planned."""
 
     stage: str = "queued"
-    sub_percent: float = 0.0
     message: str | None = None
     current_zoom: int | None = None
     min_zoom: int | None = None
     max_zoom: int | None = None
-    stage_ranges: dict[str, tuple[float, float]] = field(default_factory=lambda: dict(DEFAULT_STAGE_RANGES))
-    weight_source: str = "default"
-    calibration_samples: int = 0
+    bytes_planned: int = 0
+    bytes_done: int = 0
+    weight_source: str = "bytes"
 
     def set_stage(
         self,
         stage: str,
         *,
         message: str | None = None,
-        sub_percent: float = 0.0,
         min_zoom: int | None = None,
         max_zoom: int | None = None,
     ) -> JobProgress:
         self.stage = stage
-        self.sub_percent = sub_percent
         if message is not None:
             self.message = message
         if min_zoom is not None:
@@ -111,31 +93,33 @@ class JobProgressTracker:
             self.current_zoom = None
         return self.snapshot()
 
-    def update_subprogress(
+    def set_bytes_done(
         self,
-        sub_percent: float,
+        done: int,
         *,
         message: str | None = None,
         current_zoom: int | None = None,
     ) -> JobProgress:
-        self.sub_percent = min(max(sub_percent, self.sub_percent), 100.0)
+        planned = max(int(self.bytes_planned), 0)
+        value = max(0, int(done))
+        if planned > 0:
+            value = min(value, planned)
+        self.bytes_done = max(self.bytes_done, value)
         if message is not None:
             self.message = message
         if current_zoom is not None:
             self.current_zoom = current_zoom
-            if self.max_zoom is not None and self.min_zoom is not None:
-                zoom_span = self.max_zoom - self.min_zoom
-                if zoom_span > 0:
-                    zoom_ratio = (self.max_zoom - current_zoom) / zoom_span
-                    zoom_percent = min(max(zoom_ratio * 100.0, 0.0), 100.0)
-                    self.sub_percent = max(self.sub_percent, zoom_percent)
         return self.snapshot()
 
     def snapshot(self) -> JobProgress:
-        percent = map_subprogress(self.stage, self.sub_percent, self.stage_ranges)
         if self.stage == "done":
             percent = 100.0
-        elif self.stage == "failed":
+        elif self.bytes_planned <= 0:
+            percent = 0.0
+        else:
+            percent = round(100.0 * self.bytes_done / self.bytes_planned, 2)
+            percent = min(max(percent, 0.0), 100.0)
+        if self.stage == "failed":
             percent = min(percent, 99.99)
 
         return JobProgress(
@@ -146,7 +130,9 @@ class JobProgressTracker:
             min_zoom=self.min_zoom,
             max_zoom=self.max_zoom,
             weight_source=self.weight_source,
-            calibration_samples=self.calibration_samples if self.calibration_samples > 0 else None,
+            bytes_done=self.bytes_done,
+            bytes_planned=self.bytes_planned,
+            calibration_samples=None,
         )
 
 

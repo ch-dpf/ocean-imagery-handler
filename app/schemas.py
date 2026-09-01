@@ -158,12 +158,14 @@ class JobProgress(BaseModel):
     min_zoom: int | None = Field(default=None, description="Minimum output zoom level")
     max_zoom: int | None = Field(default=None, description="Maximum output zoom level")
     weight_source: str | None = Field(
-        default=None,
-        description="Stage weight source: default (fixed) or historical (calibrated from past jobs)",
+        default="bytes",
+        description="Progress unit: uncompressed raster bytes written / planned",
     )
+    bytes_done: int | None = Field(default=None, ge=0, description="Uncompressed raster bytes completed")
+    bytes_planned: int | None = Field(default=None, ge=0, description="Uncompressed raster bytes in the job plan")
     calibration_samples: int | None = Field(
         default=None,
-        description="Number of completed jobs used for historical calibration, if applicable",
+        description="Unused; retained for API compatibility",
     )
 
 

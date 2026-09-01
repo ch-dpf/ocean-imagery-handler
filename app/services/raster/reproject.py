@@ -26,6 +26,23 @@ from app.services.raster.warp import warp_window
 ProgressFn = Callable[[float, str | None], None]
 
 
+def destination_sample_count(
+    src_samples: int,
+    *,
+    add_alpha: bool,
+    white_as_transparent: bool,
+) -> int:
+    """uint8 band count written by ``reproject_geotiff``."""
+    bands = min(int(src_samples), 4)
+    if bands >= 4:
+        return 4
+    if bands == 2:
+        return 2
+    if add_alpha or white_as_transparent:
+        return bands + 1
+    return bands
+
+
 def plan_destination_grid(
     src: GeoTiffReader,
     dst_crs: CRS,
@@ -70,22 +87,18 @@ def reproject_geotiff(
     with GeoTiffReader(input_path, cache_bytes=cache_bytes) as src:
         dst_affine, dst_w, dst_h = plan_destination_grid(src, target)
         transformer = None if src.crs.equals(target) else make_transformer(target, src.crs)
-        src_samples = min(src.samples, 4)
-        if src_samples >= 4:
-            out_samples = 4
-        elif src_samples == 2:
-            out_samples = 2
-        elif add_alpha or white_as_transparent:
-            out_samples = src_samples + 1
-        else:
-            out_samples = src_samples
+        out_samples = destination_sample_count(
+            src.samples,
+            add_alpha=add_alpha,
+            white_as_transparent=white_as_transparent,
+        )
 
         tile = block_size
         n_ty = (dst_h + tile - 1) // tile
         n_tx = (dst_w + tile - 1) // tile
-        total = max(1, n_ty * n_tx)
         coords = [(ty, tx) for ty in range(n_ty) for tx in range(n_tx)]
-        done = 0
+        planned_bytes = dst_w * dst_h * out_samples
+        done_bytes = 0
 
         def _compute_tile(coord: tuple[int, int]) -> np.ndarray:
             ty, tx = coord
@@ -119,11 +132,15 @@ def reproject_geotiff(
             return full
 
         def tiles() -> Iterator[np.ndarray]:
-            nonlocal done
-            for full in ordered_parallel_map(coords, _compute_tile, workers=thread_count):
-                done += 1
+            nonlocal done_bytes
+            for coord, full in zip(coords, ordered_parallel_map(coords, _compute_tile, workers=thread_count)):
+                ty, tx = coord
+                sl_h = min(tile, dst_h - ty * tile)
+                sl_w = min(tile, dst_w - tx * tile)
+                done_bytes += sl_h * sl_w * out_samples
                 if on_progress is not None:
-                    on_progress(100.0 * done / total, "reproject")
+                    percent = 100.0 if planned_bytes <= 0 else 100.0 * done_bytes / planned_bytes
+                    on_progress(percent, "reproject")
                 yield full
 
         write_geotiff_tiled(

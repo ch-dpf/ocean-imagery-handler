@@ -37,17 +37,16 @@ def add_overviews(
         if not valid_levels:
             return None
         thread_count = default_workers() if workers is None else max(1, int(workers))
-        total_tiles = 0
+        samples = src.samples if src.samples <= 4 else 4
+        planned_bytes = 0
         specs: list[tuple[int, int, int]] = []
         for level in valid_levels:
             out_w = max(1, src.width // level)
             out_h = max(1, src.height // level)
-            n_ty = (out_h + block_size - 1) // block_size
-            n_tx = (out_w + block_size - 1) // block_size
             specs.append((level, out_h, out_w))
-            total_tiles += n_ty * n_tx
-        total_tiles = max(1, total_tiles)
-        done = 0
+            planned_bytes += out_w * out_h * samples
+        planned_bytes = max(1, planned_bytes)
+        done_bytes = 0
         codec, codec_args = tiff_compression(
             "DEFLATE" if compress.upper() == "JPEG" else compress,
             jpeg_quality,
@@ -68,7 +67,7 @@ def add_overviews(
                     n_tx: int = n_tx,
                     samples: int = samples,
                 ) -> Iterator[np.ndarray]:
-                    nonlocal done
+                    nonlocal done_bytes
                     coords = [(ty, tx) for ty in range(n_ty) for tx in range(n_tx)]
 
                     def _compute_tile(coord: tuple[int, int]) -> np.ndarray:
@@ -93,10 +92,15 @@ def add_overviews(
                         full[:sl_h, :sl_w] = resized[:, :, :samples]
                         return full
 
-                    for full in ordered_parallel_map(coords, _compute_tile, workers=thread_count):
-                        done += 1
+                    for coord, full in zip(
+                        coords, ordered_parallel_map(coords, _compute_tile, workers=thread_count)
+                    ):
+                        ty, tx = coord
+                        sl_h = min(block_size, out_h - ty * block_size)
+                        sl_w = min(block_size, out_w - tx * block_size)
+                        done_bytes += sl_h * sl_w * samples
                         if on_progress is not None:
-                            on_progress(100.0 * done / total_tiles, "overview add")
+                            on_progress(100.0 * done_bytes / planned_bytes, "overview add")
                         if samples == 1:
                             yield full[:, :, 0]
                         else:
