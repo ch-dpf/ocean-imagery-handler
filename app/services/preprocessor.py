@@ -101,6 +101,11 @@ def parse_wgs84_bounds(dataset: Path, env: dict[str, str] | None = None) -> list
     return [-180.0, -90.0, 180.0, 90.0]
 
 
+def _unlink_if_exists(path: Path) -> None:
+    if path.exists() or path.is_symlink():
+        path.unlink()
+
+
 def preprocess_imagery(
     input_path: Path,
     work_dir: Path,
@@ -109,11 +114,24 @@ def preprocess_imagery(
     *,
     on_subprogress: ProgressFn | None = None,
 ) -> Path:
-    """Reproject, optionally build overviews, and return a tiling-ready GeoTIFF."""
+    """Reproject, optionally build overviews, and return a tiling-ready GeoTIFF.
+
+    Writes directly to ``preprocessed.tif`` (no intermediate rename/copy). Docker
+    Desktop bind mounts on Windows often reject ``os.replace``, and copying the
+    full orthophoto would double disk I/O.
+    """
     work_dir.mkdir(parents=True, exist_ok=True)
     cache_bytes = _cache_bytes(gdal_cachemax)
-    warped = work_dir / "warped.tif"
     final = work_dir / "preprocessed.tif"
+    final_ovr = Path(str(final) + ".ovr")
+    # Drop leftovers from interrupted runs (including legacy warped.tif names).
+    for leftover in (
+        final,
+        final_ovr,
+        work_dir / "warped.tif",
+        Path(str(work_dir / "warped.tif") + ".ovr"),
+    ):
+        _unlink_if_exists(leftover)
 
     compress = options.compress.upper()
     needs_alpha = options.add_alpha or options.white_as_transparent
@@ -150,7 +168,7 @@ def preprocess_imagery(
     try:
         reproject_geotiff(
             input_path,
-            warped,
+            final,
             dst_crs=options.target_crs,
             compress=compress,
             block_size=options.block_size,
@@ -162,6 +180,7 @@ def preprocess_imagery(
             on_progress=_emit_reproject if on_subprogress is not None else None,
         )
     except RasterError as exc:
+        _unlink_if_exists(final)
         raise PreprocessError(str(exc)) from exc
 
     if options.build_overviews:
@@ -174,7 +193,7 @@ def preprocess_imagery(
 
         try:
             add_overviews(
-                warped,
+                final,
                 block_size=options.block_size,
                 compress=compress if compress != "JPEG" else "DEFLATE",
                 jpeg_quality=options.jpeg_quality,
@@ -182,17 +201,9 @@ def preprocess_imagery(
                 on_progress=_emit_overview if on_subprogress is not None else None,
             )
         except RasterError as exc:
+            _unlink_if_exists(final)
+            _unlink_if_exists(final_ovr)
             raise PreprocessError(str(exc)) from exc
-
-    if final.exists() or final.is_symlink():
-        final.unlink()
-    warped.replace(final)
-    ovr_src = Path(str(warped) + ".ovr")
-    ovr_dst = Path(str(final) + ".ovr")
-    if ovr_src.is_file():
-        if ovr_dst.exists():
-            ovr_dst.unlink()
-        ovr_src.replace(ovr_dst)
 
     if on_subprogress is not None:
         on_subprogress(100.0, "preprocess complete")

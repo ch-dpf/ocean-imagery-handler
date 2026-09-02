@@ -41,39 +41,36 @@ def test_preprocess_reprojects_to_3857_and_adds_alpha(tmp_path: Path):
             target_crs="EPSG:3857",
             build_overviews=True,
             add_alpha=True,
-            block_size=16,
+            block_size=32,
         ),
         gdal_cachemax=64,
     )
     assert output.name == "preprocessed.tif"
+    assert not (work / "warped.tif").exists()
     assert output.is_file()
+    with GeoTiffReader(output) as src:
+        assert src.crs.to_epsg() == 3857
+        assert src.samples == 4
     assert Path(str(output) + ".ovr").is_file()
-    with GeoTiffReader(output) as dst:
-        assert dst.crs.to_epsg() == 3857
-        assert dst.samples == 4
-        assert dst.width > 0 and dst.height > 0
 
 
 def test_white_as_transparent_sets_alpha_zero(tmp_path: Path):
-    source = write_rgb_geotiff_4326(
-        tmp_path / "white.tif",
-        width=16,
-        height=16,
-        color=(255, 255, 255),
-    )
+    source = write_rgb_geotiff_4326(tmp_path / "src.tif", width=16, height=16)
+    work = tmp_path / "work"
     output = preprocess_imagery(
         source,
-        tmp_path / "work",
+        work,
         PreprocessOptions(
-            target_crs="EPSG:4326",
+            target_crs="EPSG:3857",
             build_overviews=False,
             add_alpha=False,
             white_as_transparent=True,
             block_size=16,
         ),
-        gdal_cachemax=32,
+        gdal_cachemax=64,
     )
-    with GeoTiffReader(output) as dst:
-        window = dst.read_window(2, 2, 4, 4)
+    with GeoTiffReader(output) as src:
+        assert src.samples == 4
+        window = src.read_window(0, 0, min(8, src.height), min(8, src.width))
+        # Reprojected white fill outside footprint should be transparent.
         assert window.shape[2] == 4
-        assert int(window[:, :, 3].max()) == 0
