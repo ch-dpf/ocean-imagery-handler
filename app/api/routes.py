@@ -1,6 +1,6 @@
 """REST API 路由。"""
 
-import json
+import asyncio
 import shutil
 from pathlib import Path
 from uuid import uuid4
@@ -25,8 +25,14 @@ from app.schemas import (
 )
 from app.services.job_detail import job_detail_from_store
 from app.services.job_store import CorruptJobDataError, JobStore
-from app.services.tile_json import TILE_JSON, crs_label_for_profile, scheme_label
-from app.services.tile_publisher import PublishError, list_published_tilesets, publish_from_disk, unpublish_tileset
+from app.services.tile_json import crs_label_for_profile, scheme_label
+from app.services.tile_publisher import (
+    PublishError,
+    get_tileset_display_meta,
+    list_published_tilesets,
+    publish_from_disk,
+    unpublish_tileset,
+)
 from app.services.workspace_browser import WorkspacePathError, list_workspace
 from app.worker.tasks import (
     create_job_from_path,
@@ -53,47 +59,27 @@ class ManualPublishRequest(BaseModel):
     )
 
 
-def _tileset_info_from_name(name: str, settings) -> TilesetInfo:
-    url_template = None
-    scheme = None
-    min_zoom = None
-    max_zoom = None
-    profile = None
-    crs = None
-    bounds = None
-
-    link_path = settings.tilesets_dir / name
-    metadata_path = link_path / TILE_JSON
-    if metadata_path.is_file():
-        try:
-            meta = json.loads(metadata_path.read_text(encoding="utf-8"))
-            tiles = meta.get("tiles") or []
-            url_template = tiles[0] if tiles else None
-            scheme = meta.get("scheme")
-            min_zoom = meta.get("minzoom")
-            max_zoom = meta.get("maxzoom")
-            profile = meta.get("profile")
-            crs = crs_label_for_profile(profile)
-            raw_bounds = meta.get("bounds")
-            if isinstance(raw_bounds, list) and len(raw_bounds) == 4:
-                bounds = [float(v) for v in raw_bounds]
-        except (json.JSONDecodeError, OSError, TypeError, ValueError):
-            pass
-
-    if crs is None:
-        crs = crs_label_for_profile(None)
-
+def _tileset_info_from_name(
+    name: str,
+    settings,
+    *,
+    tiles_dir: Path | None = None,
+) -> TilesetInfo:
+    meta = get_tileset_display_meta(settings.tilesets_dir, name, tiles_dir=tiles_dir)
+    scheme = meta["scheme"]
+    profile = meta["profile"]
+    crs = meta["crs"] or crs_label_for_profile(profile)
     return TilesetInfo(
         name=name,
         imagery_url=settings.imagery_url_for(name),
-        url_template=url_template,
+        url_template=meta["url_template"],
         scheme=scheme,
         scheme_label=scheme_label(scheme),
-        min_zoom=min_zoom,
-        max_zoom=max_zoom,
+        min_zoom=meta["min_zoom"],
+        max_zoom=meta["max_zoom"],
         profile=profile,
         crs=crs,
-        bounds=bounds,
+        bounds=meta["bounds"],
     )
 
 
@@ -254,10 +240,10 @@ async def unpublish_job(job_id: str) -> ImageryJobDetail:
 async def list_workspace_entries(
     path: str = Query(default="", description="相对于工作区根目录的目录路径"),
 ) -> WorkspaceListResponse:
-    """列出工作区内的目录与可选 GeoTIFF 文件。"""
+    """列出工作区内的目录与可选 GeoTIFF 文件（大目录在线程池中扫描，避免阻塞事件循环）。"""
     settings = get_settings()
     try:
-        listing = list_workspace(settings.workspace_dir, path)
+        listing = await asyncio.to_thread(list_workspace, settings.workspace_dir, path)
     except WorkspacePathError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -309,7 +295,7 @@ async def publish_tileset_from_disk(body: DiskPublishRequest) -> TilesetInfo:
         raise HTTPException(status_code=status, detail=detail) from exc
 
     _ = imagery_url
-    return _tileset_info_from_name(name, settings)
+    return _tileset_info_from_name(name, settings, tiles_dir=_tiles_dir)
 
 
 @router.delete("/tilesets/{tileset_name}", response_model=TilesetInfo, summary="取消发布瓦片集")
@@ -326,12 +312,16 @@ async def unpublish_tileset_by_name(tileset_name: str) -> TilesetInfo:
 
 @router.get("/tilesets", response_model=TilesetListResponse, summary="列出已发布瓦片集")
 async def list_tilesets() -> TilesetListResponse:
-    """列出已在 imagery-server 注册的瓦片集。"""
+    """列出已在 imagery-server 注册的瓦片集。
+
+    展示元数据优先读发布旁路的 ``.{name}.layer-meta.json`` / 内存缓存，
+    避免每次跟随 symlink 进入大型 tiles 目录。
+    """
     settings = get_settings()
-    names = list_published_tilesets(settings.tilesets_dir)
-    tilesets: list[TilesetInfo] = []
 
-    for name in names:
-        tilesets.append(_tileset_info_from_name(name, settings))
+    def _load() -> list[TilesetInfo]:
+        names = list_published_tilesets(settings.tilesets_dir)
+        return [_tileset_info_from_name(name, settings) for name in names]
 
+    tilesets = await asyncio.to_thread(_load)
     return TilesetListResponse(tilesets=tilesets)

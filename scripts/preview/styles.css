@@ -272,9 +272,10 @@ body {
 }
 
 .tileset-item {
+  position: relative;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 4px;
-  padding: 10px 12px;
+  padding: 10px 56px 10px 12px;
   margin-bottom: 8px;
   cursor: pointer;
 }
@@ -291,6 +292,30 @@ body {
 .tileset-item .name {
   font-weight: 600;
   margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 22px;
+}
+
+.tileset-item .tileset-unpublish-btn {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 1;
+  background: rgba(80, 80, 80, 0.95);
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 12px;
+  line-height: 18px;
+  height: 22px;
+  cursor: pointer;
+}
+
+.tileset-item .tileset-unpublish-btn:hover {
+  background: #c62828;
 }
 
 .tileset-item .url {
@@ -325,26 +350,6 @@ body {
 
 .tileset-item .meta-tag.scheme-tms {
   color: #ffcc80;
-}
-
-.tileset-item .tileset-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.tileset-item .tileset-actions button {
-  background: rgba(80, 80, 80, 0.95);
-  color: #fff;
-  border: none;
-  border-radius: 4px;
-  padding: 5px 10px;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.tileset-item .tileset-actions button:hover {
-  background: rgba(110, 110, 110, 0.95);
 }
 
 .empty-hint,

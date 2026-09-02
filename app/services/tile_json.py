@@ -3,6 +3,7 @@
 import json
 import logging
 from pathlib import Path
+from typing import TypedDict
 
 from app.schemas import TileFormat, TileProfile, TileScheme
 
@@ -12,6 +13,16 @@ TILE_JSON = "tile.json"
 TILEJSON_VERSION = "3.0.0"
 
 TILE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+
+
+class TilesetDisplayMeta(TypedDict):
+    url_template: str | None
+    scheme: str | None
+    min_zoom: int | None
+    max_zoom: int | None
+    profile: str | None
+    crs: str | None
+    bounds: list[float] | None
 
 
 def _bounds_valid_wgs84(bounds: list[float] | list) -> bool:
@@ -137,6 +148,62 @@ def scheme_label(scheme: str | None) -> str:
     if scheme == TileScheme.XYZ.value:
         return "XYZ"
     return scheme.upper() if scheme else "—"
+
+
+def empty_tileset_display_meta() -> TilesetDisplayMeta:
+    return {
+        "url_template": None,
+        "scheme": None,
+        "min_zoom": None,
+        "max_zoom": None,
+        "profile": None,
+        "crs": None,
+        "bounds": None,
+    }
+
+
+def read_tile_display_metadata(tiles_dir: Path) -> TilesetDisplayMeta:
+    """Read list/display fields from ``tile.json`` under a tiles directory.
+
+    Missing or unreadable files yield None values without raising.
+    """
+    empty = empty_tileset_display_meta()
+    metadata_path = tiles_dir / TILE_JSON
+    if not metadata_path.is_file():
+        return empty
+
+    try:
+        data = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return empty
+
+    if not isinstance(data, dict):
+        return empty
+
+    tiles = data.get("tiles") or []
+    url_template = tiles[0] if tiles and isinstance(tiles[0], str) else None
+    scheme = data.get("scheme") if isinstance(data.get("scheme"), str) else None
+    profile = data.get("profile") if isinstance(data.get("profile"), str) else None
+    min_zoom = data.get("minzoom") if isinstance(data.get("minzoom"), int) else None
+    max_zoom = data.get("maxzoom") if isinstance(data.get("maxzoom"), int) else None
+
+    bounds = None
+    raw_bounds = data.get("bounds")
+    if isinstance(raw_bounds, list) and len(raw_bounds) == 4:
+        try:
+            bounds = [float(v) for v in raw_bounds]
+        except (TypeError, ValueError):
+            bounds = None
+
+    return {
+        "url_template": url_template,
+        "scheme": scheme,
+        "min_zoom": min_zoom,
+        "max_zoom": max_zoom,
+        "profile": profile,
+        "crs": crs_label_for_profile(profile),
+        "bounds": bounds,
+    }
 
 
 def ensure_tile_json(

@@ -5,7 +5,7 @@
   <title>正射影像瓦片发布服务</title>
   <script src="https://cesium.com/downloads/cesiumjs/releases/1.120/Build/Cesium/Cesium.js"></script>
   <link href="https://cesium.com/downloads/cesiumjs/releases/1.120/Build/Cesium/Widgets/widgets.css" rel="stylesheet" />
-  <link href="/preview/styles.css" rel="stylesheet" />
+  <link href="/preview/styles.css?v=20260902b" rel="stylesheet" />
   <style>
     html, body { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; }
     #pageHeader { position: fixed; top: 0; left: 0; right: 0; z-index: 1100; height: 48px; display: flex; align-items: center; justify-content: center; background: rgba(32,32,32,0.92); border-bottom: 1px solid rgba(255,255,255,0.1); color: #fff; font-family: sans-serif; }
@@ -178,7 +178,6 @@
           </div>
           <div class="panel-actions">
             <button type="button" id="lookupJobBtn">查询 / 轮询</button>
-            <button type="button" class="secondary" id="openJobTilesetBtn" disabled>在地图中打开</button>
           </div>
           <div id="jobProgress" class="job-progress" hidden>
             <div class="job-progress-meta">
@@ -205,7 +204,7 @@
             </dl>
           </div>
           <p id="jobQueryHint" class="empty-hint">
-            在「数据接入」提交任务后，在此查看进度；完成后可一键在地图中打开。
+            在「数据接入」提交任务后，在此查看进度；完成后可到「瓦片发布」发布图层。
           </p>
         </div>
       </aside>
@@ -240,6 +239,6 @@
   </div>
 
   <div id="toastContainer" class="toast-container"></div>
-  <script src="/preview/app.js"></script>
+  <script src="/preview/app.js?v=20260902b"></script>
 </body>
 </html>

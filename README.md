@@ -33,6 +33,13 @@ Cesium 客户端 → imagery-server :8102/imagery/{name}/{z}/{x}/{y}.png
 5. **元数据** — 生成标准 `tile.json`（TileJSON 3.0：bounds、zoom、tiles URL）
 6. **发布** — 注册到 `data/tilesets/imagery/{name}`，由 Nginx 对外服务
 
+## 部署方式
+
+| 方式 | 说明 |
+|------|------|
+| **Docker Compose**（推荐） | 见下方「快速开始」 |
+| **裸机 / Linux 生产** | 见 [docs/DEPLOY.md](docs/DEPLOY.md)（含 systemd、Nginx、`deploy/` 模板） |
+
 ## 快速开始
 
 ### 前置条件

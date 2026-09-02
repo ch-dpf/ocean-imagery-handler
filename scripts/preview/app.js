@@ -266,27 +266,24 @@
       nameEl.className = "name";
       nameEl.textContent = item.name;
 
-      const urlEl = document.createElement("div");
-      urlEl.className = "url";
-      urlEl.textContent = item.imagery_url || item.url_template || "";
-
-      const actionsEl = document.createElement("div");
-      actionsEl.className = "tileset-actions";
-
       const unpublishBtn = document.createElement("button");
       unpublishBtn.type = "button";
-      unpublishBtn.className = "secondary";
+      unpublishBtn.className = "tileset-unpublish-btn";
       unpublishBtn.textContent = "下架";
+      unpublishBtn.title = "下架";
       unpublishBtn.addEventListener("click", function (event) {
         event.stopPropagation();
         unpublishTileset(item.name);
       });
-      actionsEl.appendChild(unpublishBtn);
 
+      const urlEl = document.createElement("div");
+      urlEl.className = "url";
+      urlEl.textContent = item.imagery_url || item.url_template || "";
+
+      li.appendChild(unpublishBtn);
       li.appendChild(nameEl);
       li.appendChild(urlEl);
       li.appendChild(renderTilesetMeta(item));
-      li.appendChild(actionsEl);
       li.addEventListener("click", function () {
         loadTileset(item.name, { flyTo: true })
           .then(function () {
@@ -560,7 +557,7 @@
       hintEl.hidden = false;
       hintEl.className = "empty-hint";
       hintEl.textContent =
-        "在「数据接入」提交任务后，在此查看进度；完成后可一键在地图中打开。";
+        "在「数据接入」提交任务后，在此查看进度；完成后可到「瓦片发布」发布图层。";
     }
   }
 
@@ -623,24 +620,7 @@
   }
 
   function renderJobDetail(job) {
-    const previewBtn = document.getElementById("openJobTilesetBtn");
-
     renderJobProgress(job);
-
-    const canPreview = job.published && job.tileset_name;
-    previewBtn.disabled = !canPreview;
-    previewBtn.onclick = function () {
-      if (!canPreview) return;
-      loadTileset(job.tileset_name, { flyTo: true })
-        .then(function () {
-          closePanel();
-          showToast("已打开 tileset: " + job.tileset_name, "success");
-        })
-        .catch(function (err) {
-          showToast("预览失败: " + err.message, "error");
-        });
-    };
-
     updatePublishControls(job);
   }
 

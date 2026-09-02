@@ -4,10 +4,18 @@ import json
 import logging
 import os
 import shutil
+import threading
 from pathlib import Path
 
 from app.schemas import TileFormat, TileProfile, TileScheme
-from app.services.tile_json import TILE_JSON, TileJsonError, _bounds_valid_wgs84, ensure_tile_json
+from app.services.tile_json import (
+    TILE_JSON,
+    TileJsonError,
+    TilesetDisplayMeta,
+    _bounds_valid_wgs84,
+    ensure_tile_json,
+    read_tile_display_metadata,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,9 +28,136 @@ _EXT_TO_FORMAT = {
     "webp": TileFormat.WEBP,
 }
 
+# Sidecar next to the publish symlink — list/metadata without following into tile trees.
+_DISPLAY_META_SUFFIX = ".layer-meta.json"
+_display_meta_memory: dict[str, TilesetDisplayMeta] = {}
+_display_meta_lock = threading.Lock()
+
 
 class PublishError(RuntimeError):
     pass
+
+
+def display_meta_path(tilesets_dir: Path, name: str) -> Path:
+    """Path to the hidden display-metadata sidecar for a published tileset."""
+    return tilesets_dir / f".{name}{_DISPLAY_META_SUFFIX}"
+
+
+def _memory_cache_key(tilesets_dir: Path, name: str) -> str:
+    return f"{tilesets_dir}::{name}"
+
+
+def write_tileset_display_meta(
+    tilesets_dir: Path,
+    name: str,
+    meta: TilesetDisplayMeta,
+) -> Path:
+    """Persist lightweight display metadata beside the publish link."""
+    tilesets_dir.mkdir(parents=True, exist_ok=True)
+    path = display_meta_path(tilesets_dir, name)
+    payload = {
+        "url_template": meta.get("url_template"),
+        "scheme": meta.get("scheme"),
+        "min_zoom": meta.get("min_zoom"),
+        "max_zoom": meta.get("max_zoom"),
+        "profile": meta.get("profile"),
+        "crs": meta.get("crs"),
+        "bounds": meta.get("bounds"),
+    }
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    with _display_meta_lock:
+        _display_meta_memory[_memory_cache_key(tilesets_dir, name)] = {
+            "url_template": payload["url_template"],
+            "scheme": payload["scheme"],
+            "min_zoom": payload["min_zoom"],
+            "max_zoom": payload["max_zoom"],
+            "profile": payload["profile"],
+            "crs": payload["crs"],
+            "bounds": payload["bounds"],
+        }
+    return path
+
+
+def remove_tileset_display_meta(tilesets_dir: Path, name: str) -> None:
+    path = display_meta_path(tilesets_dir, name)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("Failed to remove tileset display meta %s: %s", path, exc)
+    with _display_meta_lock:
+        _display_meta_memory.pop(_memory_cache_key(tilesets_dir, name), None)
+
+
+def _read_sidecar_display_meta(tilesets_dir: Path, name: str) -> TilesetDisplayMeta | None:
+    path = display_meta_path(tilesets_dir, name)
+    try:
+        if not path.is_file():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Failed to read tileset display meta %s: %s", path, exc)
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    bounds = data.get("bounds")
+    parsed_bounds: list[float] | None = None
+    if isinstance(bounds, list) and len(bounds) == 4:
+        try:
+            parsed_bounds = [float(v) for v in bounds]
+        except (TypeError, ValueError):
+            parsed_bounds = None
+
+    return {
+        "url_template": data.get("url_template") if isinstance(data.get("url_template"), str) else None,
+        "scheme": data.get("scheme") if isinstance(data.get("scheme"), str) else None,
+        "min_zoom": data.get("min_zoom") if isinstance(data.get("min_zoom"), int) else None,
+        "max_zoom": data.get("max_zoom") if isinstance(data.get("max_zoom"), int) else None,
+        "profile": data.get("profile") if isinstance(data.get("profile"), str) else None,
+        "crs": data.get("crs") if isinstance(data.get("crs"), str) else None,
+        "bounds": parsed_bounds,
+    }
+
+
+def get_tileset_display_meta(
+    tilesets_dir: Path,
+    name: str,
+    *,
+    tiles_dir: Path | None = None,
+) -> TilesetDisplayMeta:
+    """Load display metadata: memory → sidecar → tiles_dir/tile.json → symlink fallback."""
+    cache_key = _memory_cache_key(tilesets_dir, name)
+    with _display_meta_lock:
+        cached = _display_meta_memory.get(cache_key)
+    if cached is not None:
+        return cached
+
+    sidecar = _read_sidecar_display_meta(tilesets_dir, name)
+    if sidecar is not None:
+        with _display_meta_lock:
+            _display_meta_memory[cache_key] = sidecar
+        return sidecar
+
+    source_dir = tiles_dir if tiles_dir is not None else (tilesets_dir / name)
+    meta = read_tile_display_metadata(source_dir)
+    # Backfill sidecar from a successful read so later lists avoid symlink I/O.
+    if any(
+        meta.get(key) is not None
+        for key in ("url_template", "profile", "min_zoom", "scheme")
+    ):
+        try:
+            write_tileset_display_meta(tilesets_dir, name, meta)
+        except OSError as exc:
+            logger.warning("Failed to backfill tileset display meta for %s: %s", name, exc)
+            with _display_meta_lock:
+                _display_meta_memory[cache_key] = meta
+    else:
+        with _display_meta_lock:
+            _display_meta_memory[cache_key] = meta
+    return meta
 
 
 def _resolve_tileset_name(job_id: str, tileset_name: str | None) -> str:
@@ -212,6 +347,12 @@ def publish_tileset(
 
     _register_tileset_link(tilesets_dir, name, tiles_dir)
 
+    # Write display sidecar from the real tiles_dir (no symlink follow on later lists).
+    try:
+        write_tileset_display_meta(tilesets_dir, name, read_tile_display_metadata(tiles_dir))
+    except OSError as exc:
+        logger.warning("Failed to write tileset display meta for %s: %s", name, exc)
+
     imagery_url = f"{imagery_base_url}/{name}"
     return imagery_url, name, url_template
 
@@ -315,18 +456,32 @@ def unpublish_tileset(tilesets_dir: Path, tileset_name: str) -> None:
     else:
         link_path.unlink()
 
+    remove_tileset_display_meta(tilesets_dir, name)
     logger.info("Unpublished tileset %s", name)
 
 
 def list_published_tilesets(tilesets_dir: Path) -> list[str]:
-    """List tileset names registered under tilesets_dir."""
+    """List tileset names registered under tilesets_dir.
+
+    Prefers ``is_symlink()`` before ``is_dir()`` so listing does not follow
+    publish links into large tile trees on slow bind mounts.
+    """
     if not tilesets_dir.is_dir():
         return []
 
     names: list[str] = []
-    for entry in sorted(tilesets_dir.iterdir()):
-        if entry.name.startswith("."):
-            continue
-        if entry.is_dir() or entry.is_symlink():
-            names.append(entry.name)
+    with os.scandir(tilesets_dir) as iterator:
+        for entry in iterator:
+            if entry.name.startswith("."):
+                continue
+            try:
+                if entry.is_symlink():
+                    names.append(entry.name)
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    names.append(entry.name)
+            except OSError:
+                continue
+
+    names.sort(key=str.lower)
     return names
