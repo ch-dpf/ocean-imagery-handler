@@ -1,0 +1,18 @@
+[Unit]
+Description=Ocean Imagery Handler Celery Worker
+After=network.target redis-server.service
+Wants=redis-server.service
+
+[Service]
+Type=simple
+User=ocean-imagery
+Group=ocean-imagery
+WorkingDirectory=/opt/ocean-imagery-handler
+EnvironmentFile=/etc/ocean-imagery-handler/env
+ExecStart=/opt/ocean-imagery-handler/.venv/bin/celery -A app.worker.celery_app worker --loglevel=info --concurrency=2
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
