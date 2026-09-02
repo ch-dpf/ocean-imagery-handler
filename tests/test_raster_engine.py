@@ -124,7 +124,10 @@ def test_destination_grid_and_zoom_are_formula_based():
     import math
 
     from app.services.raster.crsutil import EARTH_HALF, destination_pixel_size, grid_dimension
-    from app.services.raster.tiles import auto_max_zoom_mercator
+    from app.services.raster.tiles import (
+        _closest_zoom_from_ratio,
+        auto_max_zoom_mercator,
+    )
 
     affine = Affine.north_up(0.0, 10.0, 0.1, 0.1)
     px, py = destination_pixel_size(CRS.from_epsg(4326), CRS.from_epsg(3857), affine, 20, 10)
@@ -132,7 +135,43 @@ def test_destination_grid_and_zoom_are_formula_based():
     assert grid_dimension(10.0, 2.0) == 5
     assert grid_dimension(10.0, 3.0) == 4
     ratio = (2 * EARTH_HALF) / (px * 256)
-    assert auto_max_zoom_mercator(px, 256) == max(0, math.ceil(math.log2(ratio) - 1e-12))
+    assert auto_max_zoom_mercator(px, 256) == _closest_zoom_from_ratio(ratio)
+
+
+def test_auto_max_zoom_uses_closest_resolution_like_gdal():
+    """Between two matrix levels, pick nearest resolution; ties prefer lower zoom."""
+    import math
+
+    from app.services.raster.crsutil import EARTH_HALF
+    from app.services.raster.tiles import (
+        auto_max_zoom_geodetic,
+        auto_max_zoom_mercator,
+    )
+
+    tile_size = 256
+    # Exact match at zoom 14.
+    res_14 = (2 * EARTH_HALF) / (tile_size * (2**14))
+    assert auto_max_zoom_mercator(res_14, tile_size) == 14
+
+    res_15 = (2 * EARTH_HALF) / (tile_size * (2**15))
+    # Closer to 14 (absolute resolution distance).
+    nearer_14 = res_14 * 0.85 + res_15 * 0.15
+    assert auto_max_zoom_mercator(nearer_14, tile_size) == 14
+    # Closer to 15.
+    nearer_15 = res_14 * 0.15 + res_15 * 0.85
+    assert auto_max_zoom_mercator(nearer_15, tile_size) == 15
+
+    # Absolute midpoint between res_14 and res_15 → equidistant; prefer floor.
+    mid = (res_14 + res_15) / 2.0
+    assert math.isclose(abs(mid - res_14), abs(mid - res_15), rel_tol=0.0, abs_tol=1e-12)
+    assert auto_max_zoom_mercator(mid, tile_size) == 14
+
+    # Geodetic profile uses the same closest strategy.
+    geo_14 = 180.0 / (tile_size * (2**14))
+    geo_15 = 180.0 / (tile_size * (2**15))
+    assert auto_max_zoom_geodetic(geo_14, tile_size) == 14
+    assert auto_max_zoom_geodetic((geo_14 + geo_15) / 2.0, tile_size) == 14
+    assert math.isclose(geo_14 / geo_15, 2.0)
 
 
 def test_north_up_requires_exact_zero_shear():

@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     imagery_base_path: str = "/imagery"
     auto_publish: bool = False
 
+    # Browser / multipart upload limit (bytes). Larger files must use workspace path.
+    # Keep in sync with nginx client_max_body_size (default 2g).
+    max_upload_bytes: int = 2 * 1024 * 1024 * 1024
+
     # Default tiling options when request omits them (API still accepts overrides)
     tiling_thread_count: int | None = None
     tiling_resume: bool = False

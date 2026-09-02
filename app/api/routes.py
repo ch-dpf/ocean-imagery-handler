@@ -2,11 +2,10 @@
 
 import asyncio
 import json
-import shutil
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, Body, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Body, File, Form, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
@@ -44,9 +43,31 @@ from app.worker.tasks import (
 
 router = APIRouter(prefix="/api/v1/imagery", tags=["影像服务"])
 
+_UPLOAD_READ_CHUNK = 1024 * 1024
+# Multipart framing overhead beyond the raw file part.
+_MULTIPART_OVERHEAD_SLACK = 64 * 1024
+
 
 def _store() -> JobStore:
     return JobStore(get_settings())
+
+
+def upload_limit_exceeded_detail(max_bytes: int) -> str:
+    """User-facing message when browser upload exceeds the configured limit."""
+    gib = max_bytes / (1024**3)
+    size_label = f"{gib:g}GB" if abs(gib - round(gib)) < 1e-9 else f"{gib:.2f}GB"
+    return (
+        f"文件超过 {size_label} 上传限制，"
+        "请将文件放到服务器工作区后使用「服务器文件」提交。"
+    )
+
+
+def _reject_if_upload_too_large(size: int | None, max_bytes: int) -> None:
+    if size is not None and size > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=upload_limit_exceeded_detail(max_bytes),
+        )
 
 
 def _job_detail_from_store(data: dict) -> ImageryJobDetail:
@@ -104,13 +125,19 @@ async def create_job(request: ImageryJobCreate) -> ImageryJobResponse:
 
 @router.post("/jobs/upload", response_model=ImageryJobResponse, summary="上传并提交切片任务")
 async def create_job_with_upload(
+    request: Request,
     file: UploadFile = File(..., description="正射影像 GeoTIFF 文件"),
     preprocess_json: str | None = Form(default=None, description="预处理选项 JSON（PreprocessOptions）"),
     tiling_options_json: str | None = Form(default=None, description="切片选项 JSON（TilingOptions）"),
     publish_json: str | None = Form(default=None, description="发布选项 JSON（PublishOptions）"),
 ) -> ImageryJobResponse:
-    """上传 GeoTIFF 正射影像并提交切片任务。"""
+    """上传 GeoTIFF 正射影像并提交切片任务。
+
+    超过 ``MAX_UPLOAD_BYTES``（默认 2GB）的文件将被拒绝，应改用工作区
+    「服务器文件」方式提交，避免浏览器上传超时。
+    """
     settings = get_settings()
+    max_bytes = settings.max_upload_bytes
     settings.uploads_dir.mkdir(parents=True, exist_ok=True)
 
     if not file.filename:
@@ -120,21 +147,52 @@ async def create_job_with_upload(
     if suffix not in {".tif", ".tiff", ".img"}:
         raise HTTPException(status_code=400, detail="Unsupported file type")
 
-    request = ImageryJobCreate()
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            # Whole multipart body; allow small framing overhead above the file limit.
+            _reject_if_upload_too_large(
+                int(content_length) - _MULTIPART_OVERHEAD_SLACK,
+                max_bytes,
+            )
+        except ValueError:
+            pass
+
+    part_size = getattr(file, "size", None)
+    if isinstance(part_size, int):
+        _reject_if_upload_too_large(part_size, max_bytes)
+
+    job_request = ImageryJobCreate()
     if preprocess_json:
-        request.preprocess = PreprocessOptions.model_validate(json.loads(preprocess_json))
+        job_request.preprocess = PreprocessOptions.model_validate(json.loads(preprocess_json))
     if tiling_options_json:
-        request.tiling_options = TilingOptions.model_validate(json.loads(tiling_options_json))
+        job_request.tiling_options = TilingOptions.model_validate(
+            json.loads(tiling_options_json)
+        )
     if publish_json:
-        request.publish = PublishOptions.model_validate(json.loads(publish_json))
+        job_request.publish = PublishOptions.model_validate(json.loads(publish_json))
 
     temp_path = settings.uploads_dir / f"{uuid4()}{suffix}"
-    with temp_path.open("wb") as handle:
-        shutil.copyfileobj(file.file, handle)
-
+    written = 0
     try:
-        job_id = create_job_from_upload(temp_path, request)
-    finally:
+        with temp_path.open("wb") as handle:
+            while True:
+                chunk = await file.read(_UPLOAD_READ_CHUNK)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=upload_limit_exceeded_detail(max_bytes),
+                    )
+                handle.write(chunk)
+
+        job_id = create_job_from_upload(temp_path, job_request)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+    else:
         temp_path.unlink(missing_ok=True)
 
     return ImageryJobResponse(

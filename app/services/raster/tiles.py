@@ -97,22 +97,45 @@ def geodetic_tile_bounds_4326(z: int, x: int, y: int) -> tuple[float, float, flo
     return west, south, east, north
 
 
+def _closest_zoom_from_ratio(ratio: float) -> int:
+    """Pick zoom whose tile resolution is closest to the source (GDAL ``gdal raster tile``).
+
+    Matches the documented AUTO behaviour: compare source resolution against the
+    tile-matrix resolutions and take the nearest level. Ties prefer the coarser
+    zoom (floor) to avoid unnecessary oversampling, consistent with gdal2tiles'
+    "do not scale up" bias.
+    """
+    if ratio <= 1.0:
+        return 0
+    z_float = math.log2(ratio)
+    z_lo = int(math.floor(z_float + 1e-12))
+    z_hi = int(math.ceil(z_float - 1e-12))
+    if z_lo >= z_hi:
+        return max(0, z_lo)
+    # Resolution ∝ 1/2^z; compare absolute distance in resolution units.
+    # Near-ties prefer the coarser zoom to absorb float noise and avoid
+    # unnecessary oversampling (gdal2tiles "do not scale up" bias).
+    inv_ratio = 1.0 / ratio
+    err_lo = abs(inv_ratio - 1.0 / (2**z_lo))
+    err_hi = abs(inv_ratio - 1.0 / (2**z_hi))
+    tie_eps = max(inv_ratio, err_lo, err_hi) * 1e-12
+    if err_lo <= err_hi + tie_eps:
+        return max(0, z_lo)
+    return max(0, z_hi)
+
+
 def auto_max_zoom_mercator(pixel_size_m: float, tile_size: int) -> int:
     if pixel_size_m <= 0:
         return 0
     ratio = (2 * EARTH_HALF) / (pixel_size_m * tile_size)
-    if ratio <= 1.0:
-        return 0
-    return max(0, math.ceil(math.log2(ratio) - 1e-12))
+    return _closest_zoom_from_ratio(ratio)
 
 
 def auto_max_zoom_geodetic(pixel_size_deg: float, tile_size: int) -> int:
     if pixel_size_deg <= 0:
         return 0
     ratio = 180.0 / (pixel_size_deg * tile_size)
-    if ratio <= 1.0:
-        return 0
-    return max(0, math.ceil(math.log2(ratio) - 1e-12))
+    return _closest_zoom_from_ratio(ratio)
 
 
 def auto_max_zoom_raster(width: int, height: int, tile_size: int) -> int:

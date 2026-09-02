@@ -4,6 +4,10 @@
   const API_BASE = "/api/v1/imagery";
   const POLL_INTERVAL_MS = 2000;
   const WS_CONNECT_TIMEOUT_MS = 5000;
+  // Keep in sync with API MAX_UPLOAD_BYTES / nginx client_max_body_size (2g).
+  const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
+  const UPLOAD_TOO_LARGE_MSG =
+    "文件超过 2GB 上传限制，请将文件放到服务器工作区后使用「服务器文件」提交。";
 
   if (typeof Cesium.Ion !== "undefined") {
     Cesium.Ion.defaultAccessToken = undefined;
@@ -794,8 +798,16 @@
       return;
     }
 
+    const file = fileInput.files[0];
+    if (file.size > MAX_UPLOAD_BYTES) {
+      statusBox.innerHTML =
+        '<p class="error-text">' + UPLOAD_TOO_LARGE_MSG + "</p>";
+      showToast(UPLOAD_TOO_LARGE_MSG, "error");
+      return;
+    }
+
     const formData = new FormData();
-    formData.append("file", fileInput.files[0]);
+    formData.append("file", file);
     const opts = collectJobOptions();
     formData.append("preprocess_json", JSON.stringify(opts.preprocess));
     formData.append("tiling_options_json", JSON.stringify(opts.tiling_options));
@@ -1062,6 +1074,19 @@
 
     document.getElementById("uploadSubmitBtn").addEventListener("click", function () {
       submitUpload();
+    });
+
+    document.getElementById("uploadFile").addEventListener("change", function () {
+      const statusBox = document.getElementById("submitStatus");
+      const selected = document.getElementById("uploadFile").files;
+      if (!selected || !selected[0]) {
+        return;
+      }
+      if (selected[0].size > MAX_UPLOAD_BYTES) {
+        statusBox.innerHTML =
+          '<p class="error-text">' + UPLOAD_TOO_LARGE_MSG + "</p>";
+        showToast(UPLOAD_TOO_LARGE_MSG, "error");
+      }
     });
 
     document.getElementById("workspaceSubmitBtn").addEventListener("click", function () {
