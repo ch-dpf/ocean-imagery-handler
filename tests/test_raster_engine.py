@@ -139,3 +139,53 @@ def test_north_up_requires_exact_zero_shear():
     assert Affine.north_up(0.0, 1.0, 1.0, 1.0).is_north_up()
     tilted = Affine(a=1.0, b=1e-12, c=0.0, d=0.0, e=-1.0, f=1.0)
     assert not tilted.is_north_up()
+
+
+def test_save_tile_keeps_fully_transparent_png(tmp_path: Path):
+    from app.schemas import TileFormat
+    from app.services.raster.tiles import _save_tile
+
+    blank = np.zeros((16, 16, 4), dtype=np.uint8)
+    path = tmp_path / "0" / "0" / "0.png"
+    assert _save_tile(path, blank, TileFormat.PNG) is True
+    assert path.is_file() and path.stat().st_size > 0
+
+
+def test_mosaic_pyramid_writes_transparent_low_zooms(tmp_path: Path):
+    from app.schemas import TileProfile, TileScheme, TilingOptions
+    from app.services.preprocessor import preprocess_imagery
+    from app.schemas import PreprocessOptions
+    from app.services.raster.tiles import generate_tiles
+    from app.services.tile_json import scan_tile_extents
+
+    source = write_rgb_geotiff_4326(
+        tmp_path / "small.tif",
+        width=80,
+        height=60,
+        west=83.253,
+        north=17.712,
+        pixel_deg=0.00008,
+    )
+    preprocessed = preprocess_imagery(
+        source,
+        tmp_path / "prep",
+        PreprocessOptions(target_crs="EPSG:3857", build_overviews=True, add_alpha=True, block_size=32),
+        gdal_cachemax=64,
+    )
+    tiles_dir = tmp_path / "tiles"
+    generate_tiles(
+        preprocessed,
+        tiles_dir,
+        TilingOptions(
+            profile=TileProfile.MERCATOR,
+            tile_scheme=TileScheme.XYZ,
+            start_zoom=8,
+            end_zoom=0,
+            thread_count=1,
+        ),
+        cache_bytes=64 * 1024 * 1024,
+    )
+    levels = scan_tile_extents(tiles_dir)
+    assert levels
+    assert min(levels) == 0
+    assert max(levels) == 8

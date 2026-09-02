@@ -207,16 +207,17 @@ def _tile_path(output_dir: Path, z: int, x: int, y_xyz: int, scheme: TileScheme,
 
 
 def _save_tile(path: Path, array: np.ndarray, fmt: TileFormat) -> bool:
+    """Write one tile file.
+
+    Fully transparent / zero-valued tiles are still written. That matches
+    ``gdal raster tile`` without ``--skip-blank`` and keeps low-zoom pyramid
+    entries for sparse or sub-pixel footprints so ``tile.json`` minzoom can
+    reach ``end_zoom``.
+    """
     if array.size == 0:
         return False
     if array.ndim == 2:
         array = array[:, :, np.newaxis]
-    if array.shape[2] in {2, 4}:
-        alpha = array[:, :, -1]
-        if int(alpha.max()) == 0:
-            return False
-    elif int(array.max()) == 0:
-        return False
     image = array_to_image(array)
     path.parent.mkdir(parents=True, exist_ok=True)
     if fmt == TileFormat.JPEG:
