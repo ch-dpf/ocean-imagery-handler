@@ -17,7 +17,12 @@ from app.services.job_progress import (
 )
 from app.services.tile_json import TileJsonError, _bounds_valid_wgs84
 from app.services.job_store import JobStore
-from app.services.preprocessor import PreprocessError, parse_wgs84_bounds, preprocess_imagery
+from app.services.preprocessor import (
+    PreprocessError,
+    parse_wgs84_bounds,
+    preprocess_imagery,
+    validate_source_imagery,
+)
 from app.services.raster.errors import RasterError
 from app.services.tile_publisher import PublishError, publish_tileset
 from app.services.tiler_runner import TilerError, run_raster_tile
@@ -181,6 +186,19 @@ def process_imagery_job(self, job_id: str, request_data: dict) -> dict:
         )
 
         reporter.begin_stage(
+            "validate_source",
+            status=JobStatus.RUNNING,
+            message="Validating GeoTIFF metadata",
+        )
+        source_info = validate_source_imagery(
+            input_path,
+            gdal_cachemax=settings.gdal_cachemax,
+            target_crs=request.preprocess.target_crs,
+        )
+        bounds_wgs84 = source_info["wgs84Bounds"]
+        store.update(job_id, bounds_wgs84=bounds_wgs84)
+
+        reporter.begin_stage(
             "gdal_preprocess",
             status=JobStatus.PREPROCESSING,
             message="Running raster preprocess",
@@ -200,6 +218,7 @@ def process_imagery_job(self, job_id: str, request_data: dict) -> dict:
             on_subprogress=_preprocess_progress,
         )
 
+        # Prefer post-reproject footprint for tile.json / publish.
         bounds_wgs84 = parse_wgs84_bounds(preprocessed, env={"GDAL_CACHEMAX": str(settings.gdal_cachemax)})
         store.update(job_id, bounds_wgs84=bounds_wgs84)
 

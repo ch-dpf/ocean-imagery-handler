@@ -29,19 +29,39 @@ def _cache_bytes(gdal_cachemax: int | None) -> int:
     return megabytes * 1024 * 1024
 
 
-def gdal_info(dataset: Path, env: dict[str, str] | None = None) -> str:
+def gdal_info(
+    dataset: Path,
+    env: dict[str, str] | None = None,
+    *,
+    gdal_cachemax: int | None = None,
+) -> str:
     """Return human-readable raster metadata (kept name for compatibility)."""
-    del env
+    cachemax = gdal_cachemax
+    if cachemax is None and env and env.get("GDAL_CACHEMAX"):
+        try:
+            cachemax = int(env["GDAL_CACHEMAX"])
+        except ValueError:
+            cachemax = None
     try:
-        return raster_info_text(dataset)
+        return raster_info_text(dataset, cache_bytes=_cache_bytes(cachemax))
     except RasterError as exc:
         raise PreprocessError(str(exc)) from exc
 
 
-def _raster_info_json(dataset: Path, env: dict[str, str] | None = None) -> dict:
-    del env
+def _raster_info_json(
+    dataset: Path,
+    env: dict[str, str] | None = None,
+    *,
+    gdal_cachemax: int | None = None,
+) -> dict:
+    cachemax = gdal_cachemax
+    if cachemax is None and env and env.get("GDAL_CACHEMAX"):
+        try:
+            cachemax = int(env["GDAL_CACHEMAX"])
+        except ValueError:
+            cachemax = None
     try:
-        return raster_info_json(dataset)
+        return raster_info_json(dataset, cache_bytes=_cache_bytes(cachemax))
     except RasterError as exc:
         raise PreprocessError(str(exc)) from exc
 
@@ -78,9 +98,14 @@ def _bounds_valid_wgs84(bounds: list[float] | list) -> bool:
 
 def parse_wgs84_bounds(dataset: Path, env: dict[str, str] | None = None) -> list[float]:
     """Return [west, south, east, north] in WGS84."""
-    del env
+    cachemax: int | None = None
+    if env and env.get("GDAL_CACHEMAX"):
+        try:
+            cachemax = int(env["GDAL_CACHEMAX"])
+        except ValueError:
+            cachemax = None
     try:
-        data = raster_info_json(dataset)
+        data = raster_info_json(dataset, cache_bytes=_cache_bytes(cachemax))
     except RasterError as exc:
         raise PreprocessError(str(exc)) from exc
 
@@ -93,12 +118,68 @@ def parse_wgs84_bounds(dataset: Path, env: dict[str, str] | None = None) -> list
         return [float(v) for v in stored]
 
     try:
-        bounds = wgs84_bounds(dataset)
+        bounds = wgs84_bounds(dataset, cache_bytes=_cache_bytes(cachemax))
     except RasterError:
         return [-180.0, -90.0, 180.0, 90.0]
     if _bounds_valid_wgs84(bounds):
         return bounds
     return [-180.0, -90.0, 180.0, 90.0]
+
+
+def validate_source_imagery(
+    dataset: Path,
+    *,
+    gdal_cachemax: int | None = None,
+    target_crs: str | None = None,
+) -> dict:
+    """Preflight: read size / CRS / WGS84 bounds before expensive preprocess.
+
+    Raises ``PreprocessError`` when the GeoTIFF cannot be opened or lacks usable
+    georeferencing. Returns the ``raster_info_json`` payload with normalized
+    ``wgs84Bounds``.
+    """
+    if target_crs is not None:
+        try:
+            parse_crs(target_crs)
+        except RasterError as exc:
+            raise PreprocessError(str(exc)) from exc
+
+    try:
+        data = raster_info_json(dataset, cache_bytes=_cache_bytes(gdal_cachemax))
+    except RasterError as exc:
+        raise PreprocessError(str(exc)) from exc
+
+    size = data.get("size")
+    if (
+        not isinstance(size, list)
+        or len(size) != 2
+        or int(size[0]) <= 0
+        or int(size[1]) <= 0
+    ):
+        raise PreprocessError(f"Invalid raster size: {size}")
+
+    crs = data.get("coordinateSystem") or {}
+    if not isinstance(crs, dict) or (not crs.get("wkt") and crs.get("epsg") is None):
+        raise PreprocessError("Raster has no recognizable CRS")
+
+    bounds = _bounds_from_wgs84_extent(data)
+    if bounds is None or not _bounds_valid_wgs84(bounds):
+        stored = data.get("wgs84Bounds")
+        if isinstance(stored, list) and _bounds_valid_wgs84(stored):
+            bounds = [float(v) for v in stored]
+        else:
+            raise PreprocessError("Could not derive valid WGS84 bounds from raster")
+
+    data["wgs84Bounds"] = bounds
+    logger.info(
+        "Validated source %s: size=%sx%s crs=EPSG:%s bounds=%s",
+        dataset,
+        size[0],
+        size[1],
+        crs.get("epsg"),
+        bounds,
+    )
+    return data
 
 
 def _unlink_if_exists(path: Path) -> None:
@@ -132,6 +213,12 @@ def preprocess_imagery(
         Path(str(work_dir / "warped.tif") + ".ovr"),
     ):
         _unlink_if_exists(leftover)
+
+    validate_source_imagery(
+        input_path,
+        gdal_cachemax=gdal_cachemax,
+        target_crs=options.target_crs,
+    )
 
     compress = options.compress.upper()
     needs_alpha = options.add_alpha or options.white_as_transparent
