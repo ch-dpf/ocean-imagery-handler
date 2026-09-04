@@ -164,28 +164,32 @@
     }
 
     const meta = await response.json();
+    // Always address tiles under the published name used to open the layer.
+    // tile.json may still contain a stale job_id path after rename/republish.
+    const templateFromMeta =
+      meta.tiles && meta.tiles[0] ? String(meta.tiles[0]) : "";
+    const extMatch = templateFromMeta.match(/\.([a-z0-9]+)(?:\?|$)/i);
+    const ext = extMatch ? extMatch[1] : "png";
     let urlTemplate =
-      (meta.tiles && meta.tiles[0]) ||
-      "/imagery/" + encodeURIComponent(name) + "/{z}/{x}/{y}.png";
+      "/imagery/" + encodeURIComponent(name) + "/{z}/{x}/{y}." + ext;
 
     if (meta.scheme === "tms") {
       urlTemplate = urlTemplate.replace("{y}", "{reverseY}");
-    }
-
-    try {
-      const templateUrl = new URL(urlTemplate, window.location.origin);
-      urlTemplate = templateUrl.pathname + templateUrl.search;
-    } catch (_) {
-      // Keep relative templates as-is.
     }
 
     const bounds = parseBounds(meta.bounds);
     minZoom = meta.minzoom != null ? meta.minzoom : 0;
     maxZoom = meta.maxzoom != null ? meta.maxzoom : 18;
 
+    const profile = (meta.profile || "mercator").toLowerCase();
+    const tilingScheme =
+      profile === "geodetic"
+        ? new Cesium.GeographicTilingScheme()
+        : new Cesium.WebMercatorTilingScheme();
+
     const providerOptions = {
       url: urlTemplate,
-      tilingScheme: new Cesium.WebMercatorTilingScheme(),
+      tilingScheme: tilingScheme,
       minimumLevel: minZoom,
       maximumLevel: maxZoom,
     };
@@ -1182,6 +1186,7 @@
 
     const params = new URLSearchParams(window.location.search);
     const jobId = params.get("job");
+    const tilesetName = params.get("tileset");
 
     setStatus("请通过「数据接入」提交影像，「图层管理」选择预览");
 
@@ -1189,6 +1194,13 @@
       openPanel("progress");
       setJobIdFields(jobId);
       startPolling(jobId);
+    } else if (tilesetName) {
+      openPanel("layers");
+      refreshTilesetList().catch(function () {});
+      loadTileset(tilesetName, { flyTo: true }).catch(function (err) {
+        showToast("加载 tileset 失败: " + err.message, "error");
+        setStatus("加载失败: " + err.message);
+      });
     }
   }
 
