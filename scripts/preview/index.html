@@ -71,32 +71,17 @@
           <details class="advanced-options" id="advancedOptions">
             <summary>高级选项</summary>
             <div class="options-section">
-              <h3>预处理</h3>
               <div class="form-row">
                 <label for="optTargetCrs">目标坐标系</label>
                 <input type="text" id="optTargetCrs" value="EPSG:3857" />
               </div>
-              <div class="form-row">
-                <label for="optCompress">压缩方式</label>
-                <select id="optCompress">
-                  <option value="DEFLATE" selected>DEFLATE</option>
-                  <option value="LZW">LZW</option>
-                  <option value="JPEG">JPEG</option>
-                </select>
-              </div>
-              <div class="form-row form-checks">
-                <label><input type="checkbox" id="optBuildOverviews" checked /> 构建概览图</label>
-                <label><input type="checkbox" id="optAddAlpha" checked /> 添加 Alpha 透明通道</label>
-                <label><input type="checkbox" id="optWhiteTransparent" /> 白色视为透明</label>
-              </div>
             </div>
             <div class="options-section">
-              <h3>切片</h3>
               <div class="form-grid">
                 <div class="form-row">
                   <label for="optTileScheme">瓦片索引</label>
                   <select id="optTileScheme">
-                    <option value="xyz" selected>XYZ（Cesium 推荐）</option>
+                    <option value="xyz" selected>XYZ</option>
                     <option value="tms">TMS</option>
                   </select>
                 </div>
@@ -104,46 +89,10 @@
                   <label for="optProfile">切片方案</label>
                   <select id="optProfile">
                     <option value="mercator" selected>墨卡托 (Web Mercator)</option>
-                    <option value="geodetic">大地坐标 (WGS84)</option>
+                    <option value="geodetic">经纬度 (WGS84)</option>
                     <option value="raster">栅格</option>
                   </select>
                 </div>
-                <div class="form-row">
-                  <label for="optTileFormat">瓦片格式</label>
-                  <select id="optTileFormat">
-                    <option value="PNG" selected>PNG</option>
-                    <option value="JPEG">JPEG</option>
-                    <option value="WEBP">WEBP</option>
-                  </select>
-                </div>
-                <div class="form-row">
-                  <label for="optResampling">重采样</label>
-                  <select id="optResampling">
-                    <option value="bilinear" selected>双线性</option>
-                    <option value="near">最邻近</option>
-                    <option value="cubic">三次卷积</option>
-                    <option value="lanczos">Lanczos</option>
-                    <option value="average">平均值</option>
-                  </select>
-                </div>
-                <div class="form-row">
-                  <label for="optStartZoom">最大 zoom（留空自动）</label>
-                  <input type="number" id="optStartZoom" min="0" placeholder="自动" />
-                </div>
-                <div class="form-row">
-                  <label for="optEndZoom">最小 zoom</label>
-                  <input type="number" id="optEndZoom" min="0" value="0" />
-                </div>
-              </div>
-            </div>
-            <div class="options-section">
-              <h3>发布</h3>
-              <div class="form-row">
-                <label for="optTilesetName">Tileset 名称（可选）</label>
-                <input type="text" id="optTilesetName" placeholder="留空则使用 job_id" />
-              </div>
-              <div class="form-row form-checks">
-                <label><input type="checkbox" id="optAutoPublish" /> 完成后自动发布</label>
               </div>
             </div>
           </details>
@@ -240,6 +189,6 @@
   </div>
 
   <div id="toastContainer" class="toast-container"></div>
-  <script src="/preview/app.js?v=20260902b"></script>
+  <script src="/preview/app.js?v=20260904a"></script>
 </body>
 </html>

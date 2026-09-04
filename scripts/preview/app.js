@@ -740,47 +740,18 @@
     return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
   }
 
-  function readOptionalInt(id) {
-    const el = document.getElementById(id);
-    if (!el) return undefined;
-    const raw = el.value.trim();
-    if (!raw) return undefined;
-    const value = parseInt(raw, 10);
-    return Number.isNaN(value) ? undefined : value;
-  }
-
   function collectJobOptions() {
+    // Only expose a subset in the UI; remaining fields use API schema defaults.
     const preprocess = {
       target_crs: document.getElementById("optTargetCrs").value.trim() || "EPSG:3857",
-      build_overviews: document.getElementById("optBuildOverviews").checked,
-      add_alpha: document.getElementById("optAddAlpha").checked,
-      white_as_transparent: document.getElementById("optWhiteTransparent").checked,
-      compress: document.getElementById("optCompress").value,
     };
 
     const tiling_options = {
       profile: document.getElementById("optProfile").value,
-      tile_format: document.getElementById("optTileFormat").value,
       tile_scheme: document.getElementById("optTileScheme").value,
-      end_zoom: readOptionalInt("optEndZoom") ?? 0,
-      resampling_method: document.getElementById("optResampling").value,
     };
 
-    const startZoom = readOptionalInt("optStartZoom");
-    if (startZoom !== undefined) {
-      tiling_options.start_zoom = startZoom;
-    }
-
-    const publish = {
-      auto_publish: document.getElementById("optAutoPublish").checked,
-    };
-
-    const tilesetName = document.getElementById("optTilesetName").value.trim();
-    if (tilesetName) {
-      publish.tileset_name = tilesetName;
-    }
-
-    return { preprocess: preprocess, tiling_options: tiling_options, publish: publish };
+    return { preprocess: preprocess, tiling_options: tiling_options };
   }
 
   function afterJobSubmitted(jobId, message) {
@@ -815,7 +786,6 @@
     const opts = collectJobOptions();
     formData.append("preprocess_json", JSON.stringify(opts.preprocess));
     formData.append("tiling_options_json", JSON.stringify(opts.tiling_options));
-    formData.append("publish_json", JSON.stringify(opts.publish));
 
     submitBtn.disabled = true;
     statusBox.innerHTML = '<p class="empty-hint">上传中，请稍候…</p>';
@@ -856,7 +826,6 @@
           input_path: selectedWorkspaceFile.absolute_path,
           preprocess: opts.preprocess,
           tiling_options: opts.tiling_options,
-          publish: opts.publish,
         }),
       });
       afterJobSubmitted(result.job_id, "任务已提交");
