@@ -235,6 +235,26 @@ celery -A app.worker.celery_app worker --loglevel=info
 
 本地 Worker 需 Python 3.11+，并安装 `requirements.txt`（含 `numpy`、`pillow`、`tifffile`、`imagecodecs`、`pyproj`）。输入须为带地理参考的 **GeoTIFF**。
 
+### 同步 Python 调用
+
+核心处理流水线可以脱离 FastAPI、Celery 和 Redis 同步运行，供命令行脚本或其他
+Python 程序复用：
+
+```python
+from app.schemas import ImageryJobCreate
+from app.services.imagery_pipeline import run_imagery_pipeline
+
+result = run_imagery_pipeline(
+    "local-job",
+    ImageryJobCreate(input_path="/data/workspace/ortho.tif"),
+)
+print(result["output_dir"])
+```
+
+该调用仍会读取应用环境变量，并将产物写入 `WORKSPACE_DIR/jobs/local-job/`。如需获取
+阶段和进度，可通过 `on_event` 参数接收 `PipelineEvent`。同步调用产生的状态不会写入
+Redis；传入 `publish.auto_publish=true` 时仍会执行瓦片发布。
+
 ## 项目结构
 
 ```

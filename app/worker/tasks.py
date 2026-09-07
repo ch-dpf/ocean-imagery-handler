@@ -6,26 +6,27 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.schemas import ImageryJobCreate, JobProgress, JobStatus, TilingOptions
-from app.services.byte_progress import ByteBudget, fraction_to_bytes, plan_pipeline_bytes
+from app.services.imagery_pipeline import (
+    PipelineEvent,
+    publish_pipeline_tileset,
+    resolve_tiling_options,
+    run_imagery_pipeline,
+)
 from app.services.job_progress import (
-    JobProgressTracker,
     ThrottledProgressWriter,
-    parse_zoom_level,
     progress_to_store_fields,
 )
-from app.services.tile_json import TileJsonError, _bounds_valid_wgs84
 from app.services.job_store import JobStore
 from app.services.preprocessor import (
     PreprocessError,
     parse_wgs84_bounds,
-    preprocess_imagery,
-    validate_source_imagery,
 )
 from app.services.raster.errors import RasterError
-from app.services.tile_publisher import PublishError, publish_tileset
-from app.services.tiler_runner import TilerError, run_raster_tile
+from app.services.tile_json import TileJsonError, _bounds_valid_wgs84
+from app.services.tile_publisher import PublishError
+from app.services.tiler_runner import TilerError
 from app.worker.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -39,114 +40,43 @@ def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _resolve_tiling_options(tiling: TilingOptions, settings: Settings) -> TilingOptions:
+    """Compatibility wrapper for callers of the former task-local helper."""
+    return resolve_tiling_options(tiling, settings)
+
+
 class _JobProgressReporter:
-    def __init__(self, job_id: str, budget: ByteBudget) -> None:
+    """Persist pipeline events for the Celery/API execution path."""
+
+    def __init__(self, job_id: str) -> None:
         self._job_id = job_id
         self._store = _store()
-        self.budget = budget
-        self.tracker = JobProgressTracker(
-            bytes_planned=budget.total,
-            weight_source="bytes",
-        )
         self._writer = ThrottledProgressWriter(self._persist)
+        self._state: tuple[JobStatus, str] | None = None
+        self.last_progress: JobProgress | None = None
 
     def _persist(self, progress: JobProgress) -> None:
         self._store.update(self._job_id, **progress_to_store_fields(progress))
 
-    def begin_stage(
-        self,
-        stage: str,
-        *,
-        status: JobStatus,
-        message: str | None = None,
-        min_zoom: int | None = None,
-        max_zoom: int | None = None,
-    ) -> None:
-        progress = self.tracker.set_stage(
-            stage,
-            message=message,
-            min_zoom=min_zoom,
-            max_zoom=max_zoom,
-        )
-        self._store.update(
-            self._job_id,
-            status=status.value,
-            stage=stage,
-            **progress_to_store_fields(progress),
-        )
-        self._writer.emit(progress, force=True)
-
-    def set_bytes_done(
-        self,
-        done: int,
-        *,
-        message: str | None = None,
-        current_zoom: int | None = None,
-    ) -> None:
-        progress = self.tracker.set_bytes_done(
-            done,
-            message=message,
-            current_zoom=current_zoom,
-        )
-        self._writer.emit(progress)
-
-    def complete(self, *, message: str = "Done") -> None:
-        self.tracker.set_bytes_done(self.budget.total, message=message)
-        progress = self.tracker.set_stage("done", message=message)
-        self._writer.emit(progress, force=True)
-
-
-def _should_auto_publish(request: ImageryJobCreate, settings) -> bool:
-    if request.publish.auto_publish is not None:
-        return request.publish.auto_publish
-    return settings.auto_publish
-
-
-def _resolve_tiling_options(tiling: TilingOptions, settings) -> TilingOptions:
-    """Fill thread_count / resume from settings when the request omits them."""
-    return tiling.model_copy(
-        update={
-            "thread_count": (
-                tiling.thread_count
-                if tiling.thread_count is not None
-                else settings.tiling_thread_count
-            ),
-            "resume": tiling.resume if tiling.resume is not None else settings.tiling_resume,
-        }
-    )
-
-
-def _publish_job_tileset(
-    job_id: str,
-    output_dir: Path,
-    request: ImageryJobCreate,
-    settings,
-    bounds_wgs84: list[float],
-    reporter: _JobProgressReporter | None = None,
-) -> tuple[str, str, str]:
-    store = _store()
-    if reporter is not None:
-        reporter.begin_stage(
-            "register_tileset",
-            status=JobStatus.PUBLISHING,
-            message="Registering tileset",
-        )
-    else:
-        store.update(job_id, status=JobStatus.PUBLISHING.value, stage="register_tileset")
-
-    imagery_url, tileset_name, url_template = publish_tileset(
-        job_id=job_id,
-        tiles_dir=output_dir,
-        tilesets_dir=settings.tilesets_dir,
-        public_url=settings.imagery_server_public_url,
-        base_path=settings.imagery_base_path,
-        profile=request.tiling_options.profile,
-        tile_format=request.tiling_options.tile_format,
-        bounds_wgs84=bounds_wgs84,
-        tileset_name=request.publish.tileset_name,
-        tile_scheme=request.tiling_options.tile_scheme,
-    )
-    return imagery_url, tileset_name, url_template
+    def handle(self, event: PipelineEvent) -> None:
+        self.last_progress = event.progress
+        state = (event.status, event.stage)
+        if state != self._state or event.fields:
+            event_fields = {
+                key: value
+                for key, value in event.fields.items()
+                if key not in {"job_id", "status", "stage", "progress"}
+            }
+            self._store.update(
+                self._job_id,
+                status=event.status.value,
+                stage=event.stage,
+                **event_fields,
+                **progress_to_store_fields(event.progress),
+            )
+            self._state = state
+            return
+        self._writer.emit(event.progress)
 
 
 @celery_app.task(bind=True, name="imagery.process_job")
@@ -154,145 +84,23 @@ def process_imagery_job(self, job_id: str, request_data: dict) -> dict:
     settings = get_settings()
     store = _store()
     request = ImageryJobCreate.model_validate(request_data)
-
-    job_dir = settings.jobs_dir / job_id
-    preprocess_dir = job_dir / "preprocess"
-    output_dir = job_dir / "tiles"
-    auto_publish = _should_auto_publish(request, settings)
-    reporter: _JobProgressReporter | None = None
+    reporter = _JobProgressReporter(job_id)
 
     try:
-        if not request.input_path:
-            raise ValueError("input_path is required for background processing")
-
-        input_path = Path(request.input_path)
-        if not input_path.is_file():
-            raise FileNotFoundError(f"Input file not found: {input_path}")
-
-        tiling = _resolve_tiling_options(request.tiling_options, settings)
-        cache_bytes = max(int(settings.gdal_cachemax or 64), 1) * 1024 * 1024
-        budget = plan_pipeline_bytes(
-            input_path,
-            request.preprocess,
-            tiling,
-            cache_bytes=cache_bytes,
+        result = run_imagery_pipeline(
+            job_id,
+            request,
+            settings=settings,
+            on_event=reporter.handle,
         )
-        reporter = _JobProgressReporter(job_id, budget)
-
-        reporter.begin_stage(
-            "initializing",
-            status=JobStatus.RUNNING,
-            message="Initializing job",
+        result_fields = {key: value for key, value in result.items() if key != "job_id"}
+        store.update(
+            job_id,
+            **result_fields,
+            stage="done",
+            error=None,
+            completed_at=_utc_now_iso(),
         )
-
-        reporter.begin_stage(
-            "validate_source",
-            status=JobStatus.RUNNING,
-            message="Validating GeoTIFF metadata",
-        )
-        source_info = validate_source_imagery(
-            input_path,
-            gdal_cachemax=settings.gdal_cachemax,
-            target_crs=request.preprocess.target_crs,
-        )
-        bounds_wgs84 = source_info["wgs84Bounds"]
-        store.update(job_id, bounds_wgs84=bounds_wgs84)
-
-        reporter.begin_stage(
-            "gdal_preprocess",
-            status=JobStatus.PREPROCESSING,
-            message="Running raster preprocess",
-        )
-
-        def _preprocess_progress(sub_percent: float, message: str | None) -> None:
-            reporter.set_bytes_done(
-                fraction_to_bytes(budget.preprocess, sub_percent),
-                message=message,
-            )
-
-        preprocessed = preprocess_imagery(
-            input_path=input_path,
-            work_dir=preprocess_dir,
-            options=request.preprocess,
-            gdal_cachemax=settings.gdal_cachemax,
-            on_subprogress=_preprocess_progress,
-        )
-
-        # Prefer post-reproject footprint for tile.json / publish.
-        bounds_wgs84 = parse_wgs84_bounds(preprocessed, env={"GDAL_CACHEMAX": str(settings.gdal_cachemax)})
-        store.update(job_id, bounds_wgs84=bounds_wgs84)
-
-        min_zoom = tiling.end_zoom
-        max_zoom = tiling.start_zoom
-        reporter.begin_stage(
-            "gdal_raster_tile",
-            status=JobStatus.TILING,
-            message="Generating tiles",
-            min_zoom=min_zoom,
-            max_zoom=max_zoom,
-        )
-
-        def _tile_progress(sub_percent: float, message: str | None) -> None:
-            current_zoom = parse_zoom_level(message) if message else None
-            reporter.set_bytes_done(
-                budget.preprocess + fraction_to_bytes(budget.tiles, sub_percent),
-                message=message or "Generating tiles",
-                current_zoom=current_zoom,
-            )
-
-        run_raster_tile(
-            input_path=preprocessed,
-            output_dir=output_dir,
-            options=tiling,
-            gdal_cachemax=settings.gdal_cachemax,
-            on_subprogress=_tile_progress,
-        )
-
-        result: dict[str, str | bool | list[float]] = {
-            "job_id": job_id,
-            "status": JobStatus.COMPLETED.value,
-            "output_dir": str(output_dir),
-            "bounds_wgs84": bounds_wgs84,
-            "published": False,
-        }
-
-        if auto_publish:
-            imagery_url, tileset_name, url_template = _publish_job_tileset(
-                job_id, output_dir, request, settings, bounds_wgs84, reporter=reporter
-            )
-            store.update(
-                job_id,
-                status=JobStatus.COMPLETED.value,
-                stage="done",
-                output_dir=str(output_dir),
-                imagery_url=imagery_url,
-                tileset_name=tileset_name,
-                cesium_url_template=url_template,
-                published=True,
-                error=None,
-                completed_at=_utc_now_iso(),
-            )
-            reporter.complete(message="Completed and published")
-            result.update(
-                {
-                    "imagery_url": imagery_url,
-                    "tileset_name": tileset_name,
-                    "cesium_url_template": url_template,
-                    "published": True,
-                }
-            )
-        else:
-            store.update(
-                job_id,
-                status=JobStatus.COMPLETED.value,
-                stage="done",
-                output_dir=str(output_dir),
-                published=False,
-                error=None,
-                completed_at=_utc_now_iso(),
-            )
-            reporter.complete(message="Completed")
-
         return result
 
     except (
@@ -311,10 +119,10 @@ def process_imagery_job(self, job_id: str, request_data: dict) -> dict:
             "error": str(exc),
             "completed_at": _utc_now_iso(),
         }
-        if reporter is not None:
-            failed_progress = reporter.tracker.snapshot()
-            failed_progress.message = str(exc)
-            failed_progress.phase = "failed"
+        if reporter.last_progress is not None:
+            failed_progress = reporter.last_progress.model_copy(
+                update={"message": str(exc), "phase": "failed"}
+            )
             failed_fields.update(progress_to_store_fields(failed_progress))
         store.update(job_id, **failed_fields)
         raise
@@ -376,7 +184,8 @@ def publish_completed_job(job_id: str, tileset_name: str | None = None) -> tuple
             update={"publish": request.publish.model_copy(update={"tileset_name": tileset_name})}
         )
 
-    imagery_url, resolved_name, url_template = _publish_job_tileset(
+    store.update(job_id, status=JobStatus.PUBLISHING.value, stage="register_tileset")
+    imagery_url, resolved_name, url_template = publish_pipeline_tileset(
         job_id,
         Path(output_dir),
         request,
