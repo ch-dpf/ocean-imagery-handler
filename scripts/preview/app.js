@@ -1004,22 +1004,37 @@
     });
   }
 
-  function createBaseImageryProvider() {
-    // Esri World Imagery MapServer/?f=json now returns 403 for anonymous
-    // browser clients (Akamai / API-key policy). Use OSM so preview boots
-    // without a Cesium Ion token; overlay tilesets do not depend on this layer.
-    return new Cesium.UrlTemplateImageryProvider({
-      url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-      maximumLevel: 19,
-      credit: "© OpenStreetMap contributors",
-    });
+  function tryAddOptionalBaseMap() {
+    // Optional reference basemap only. Preview must boot even when ArcGIS /
+    // OSM / Ion are unreachable (common on intranet / restricted networks).
+    // Orthophoto overlay tilesets do not depend on this layer.
+    try {
+      let provider;
+      if (typeof Cesium.OpenStreetMapImageryProvider === "function") {
+        provider = new Cesium.OpenStreetMapImageryProvider({
+          url: "https://tile.openstreetmap.org/",
+        });
+      } else {
+        provider = new Cesium.UrlTemplateImageryProvider({
+          url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+          maximumLevel: 19,
+          credit: "© OpenStreetMap contributors",
+        });
+      }
+      viewer.imageryLayers.addImageryProvider(provider);
+    } catch (err) {
+      console.warn(
+        "Optional base map unavailable; continuing without it:",
+        err && err.message ? err.message : err,
+      );
+    }
   }
 
   async function initViewer() {
-    const baseProvider = createBaseImageryProvider();
-
+    // baseLayer: false avoids Cesium 1.107+ default ArcGIS World Imagery,
+    // which requires an Esri token and fails with 403 for anonymous clients.
     viewer = new Cesium.Viewer("cesiumContainer", {
-      baseLayer: new Cesium.ImageryLayer(baseProvider),
+      baseLayer: false,
       terrainProvider: new Cesium.EllipsoidTerrainProvider(),
       animation: false,
       timeline: false,
@@ -1032,6 +1047,7 @@
       selectionIndicator: false,
     });
     viewer.scene.globe.enableLighting = false;
+    tryAddOptionalBaseMap();
 
     const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
     handler.setInputAction(function (movement) {
