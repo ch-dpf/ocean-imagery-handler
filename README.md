@@ -240,6 +240,24 @@ celery -A app.worker.celery_app worker --loglevel=info
 核心处理流水线可以脱离 FastAPI、Celery 和 Redis 同步运行，供命令行脚本或其他
 Python 程序复用：
 
+安装项目后可直接使用命令行入口：
+
+```powershell
+pip install -e .
+ocean-imagery run D:\data\ortho.tif
+
+# 不安装命令入口，直接通过 Python 脚本运行
+python3 ocean_imagery.py run D:\data\ortho.tif --workspace-dir D:\data\imagery
+
+# 指定任务目录名称，并在完成后发布
+ocean-imagery run D:\data\ortho.tif --job-id local-job --tileset-name demo
+```
+
+命令执行期间，阶段和百分比进度写入 stderr；成功后，结果 JSON 写入 stdout。
+`--tileset-name` 会自动启用发布，也可单独传入 `--auto-publish`。
+
+也可以在 Python 中直接调用：
+
 ```python
 from app.schemas import ImageryJobCreate
 from app.services.imagery_pipeline import run_imagery_pipeline
