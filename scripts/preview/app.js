@@ -1004,19 +1004,19 @@
     });
   }
 
+  function createBaseImageryProvider() {
+    // Esri World Imagery MapServer/?f=json now returns 403 for anonymous
+    // browser clients (Akamai / API-key policy). Use OSM so preview boots
+    // without a Cesium Ion token; overlay tilesets do not depend on this layer.
+    return new Cesium.UrlTemplateImageryProvider({
+      url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+      maximumLevel: 19,
+      credit: "© OpenStreetMap contributors",
+    });
+  }
+
   async function initViewer() {
-    let baseProvider;
-    if (Cesium.ArcGisMapServerImageryProvider.fromUrl) {
-      baseProvider = await Cesium.ArcGisMapServerImageryProvider.fromUrl(
-        "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer",
-      );
-    } else {
-      baseProvider = new Cesium.UrlTemplateImageryProvider({
-        url:
-          "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        maximumLevel: 19,
-      });
-    }
+    const baseProvider = createBaseImageryProvider();
 
     viewer = new Cesium.Viewer("cesiumContainer", {
       baseLayer: new Cesium.ImageryLayer(baseProvider),
