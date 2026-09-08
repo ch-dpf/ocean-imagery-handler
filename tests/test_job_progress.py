@@ -1,38 +1,14 @@
 """Job progress parsing and mapping tests."""
 
-import subprocess
-import sys
-import time
-
-import pytest
-
 from app.schemas import JobProgress
 from app.services.job_progress import (
     JobProgressTracker,
     ThrottledProgressWriter,
-    gdal_progress_flag_unsupported,
     map_subprogress,
-    parse_gdal_progress_chunk,
     parse_zoom_level,
     progress_to_store_fields,
-    run_gdal_command,
 )
 from app.services.progress_calibration import build_stage_ranges
-
-
-def test_parse_gdal_dot_progress():
-    current = 0.0
-    current = parse_gdal_progress_chunk("0...10...20", current)
-    assert current == 20.0
-    current = parse_gdal_progress_chunk("...30...40", current)
-    assert current == 40.0
-    current = parse_gdal_progress_chunk("100 - done.", current)
-    assert current == 100.0
-
-
-def test_parse_gdal_percent_progress():
-    current = parse_gdal_progress_chunk("Processing: 42.5%", 0.0)
-    assert current == 42.5
 
 
 def test_parse_zoom_level():
@@ -92,12 +68,6 @@ def test_throttled_writer_forces_final_emit():
     assert len(emitted) == 2
 
 
-def test_gdal_progress_flag_unsupported():
-    stderr = "ERROR 1: Unknown argument: -progress\nUsage: gdalwarp ..."
-    assert gdal_progress_flag_unsupported(stderr) is True
-    assert gdal_progress_flag_unsupported("gdalwarp failed: out of memory") is False
-
-
 def test_tracker_exposes_weight_source():
     tracker = JobProgressTracker(
         stage="gdal_preprocess",
@@ -117,38 +87,3 @@ def test_progress_to_store_fields():
     )
     assert payload["progress"]["percent"] == 33.3
     assert payload["progress"]["phase"] == "gdal_raster_tile"
-
-
-def test_run_gdal_command_streams_stdout_progress_before_exit():
-    """Progress dots arrive mid-run; must not wait for process EOF (GDAL tile behavior)."""
-    script = (
-        "import sys, time\n"
-        "parts = ['0...', '10...', '20...', '30...', '40...', "
-        "'50...', '60...', '70...', '80...', '90...', '100 - done.\\n']\n"
-        "for part in parts:\n"
-        "    sys.stdout.write(part)\n"
-        "    sys.stdout.flush()\n"
-        "    time.sleep(0.12)\n"
-    )
-    events: list[tuple[float, float]] = []
-    started = time.monotonic()
-
-    def on_subprogress(percent: float, _message: str | None) -> None:
-        events.append((time.monotonic() - started, percent))
-
-    run_gdal_command([sys.executable, "-c", script], on_subprogress=on_subprogress)
-
-    mid = [(elapsed, percent) for elapsed, percent in events if 0.0 < percent < 100.0]
-    assert mid, f"expected mid-run progress updates, got {events!r}"
-    # Writer sleeps ~1.3s total; first real step should arrive early, not only at EOF.
-    assert mid[0][0] < 0.8
-    assert any(percent >= 20.0 for _, percent in mid)
-    assert events[-1][1] == 100.0
-
-
-def test_run_gdal_command_failure_preserves_stderr_text():
-    script = "import sys; sys.stderr.write('ERROR 1: boom\\n'); sys.exit(2)\n"
-    with pytest.raises(subprocess.CalledProcessError) as exc_info:
-        run_gdal_command([sys.executable, "-c", script])
-    assert "ERROR 1: boom" in (exc_info.value.stderr or "")
-    assert isinstance(exc_info.value.stderr, str)

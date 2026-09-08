@@ -1,9 +1,8 @@
-"""Job progress tracking and GDAL subprocess progress parsing."""
+"""Job progress tracking for the imagery processing pipeline."""
 
 from __future__ import annotations
 
 import re
-import subprocess
 import threading
 import time
 from collections.abc import Callable
@@ -30,30 +29,11 @@ DEFAULT_STAGE_RANGES: dict[str, tuple[float, float]] = {
 # Backward-compatible alias for tests and imports.
 STAGE_RANGES = DEFAULT_STAGE_RANGES
 
-_PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
-_DOT_STEP_RE = re.compile(r"(?:^|\.{3})(\d+)(?=\.{3}|$|\s|-)")
-_DONE_RE = re.compile(r"\b100\b.*\bdone\b", re.IGNORECASE)
 _ZOOM_RE = re.compile(
     r"(?:zoom(?:\s+level)?|overview(?:\s+for)?(?:\s+zoom(?:\s+level)?)?)"
     r"[\s:=\-]*(\d+)",
     re.IGNORECASE,
 )
-
-
-def parse_gdal_progress_chunk(chunk: str, current: float) -> float:
-    """Parse GDAL classic/progress-bar output and return monotonic 0-100 percent."""
-    updated = current
-
-    for match in _DOT_STEP_RE.finditer(chunk):
-        updated = max(updated, float(match.group(1)))
-
-    for match in _PERCENT_RE.finditer(chunk):
-        updated = max(updated, float(match.group(1)))
-
-    if _DONE_RE.search(chunk) or "100 - done" in chunk.lower():
-        updated = 100.0
-
-    return min(max(updated, 0.0), 100.0)
 
 
 def parse_zoom_level(chunk: str) -> int | None:
@@ -171,97 +151,6 @@ class ThrottledProgressWriter:
             self._last_emit_at = now
             self._last_percent = progress.percent
         self.callback(progress)
-
-
-def gdal_progress_flag_unsupported(stderr: str) -> bool:
-    """True when GDAL rejected a -progress/--progress CLI flag."""
-    lowered = stderr.lower()
-    return (
-        "unknown argument: -progress" in lowered
-        or "unknown argument: --progress" in lowered
-        or "unknown option" in lowered and "progress" in lowered
-    )
-
-
-# GDAL --progress often emits "0...10...20..." without newlines until completion.
-# read()-until-EOF would hide mid-run updates; small binary chunks keep parsing live.
-_STREAM_CHUNK_SIZE = 256
-_PARSE_WINDOW = 512
-
-
-def run_gdal_command(
-    cmd: list[str],
-    *,
-    env: dict[str, str] | None = None,
-    on_subprogress: Callable[[float, str | None], None] | None = None,
-) -> None:
-    """Run a GDAL CLI command, streaming output for tools that support --progress."""
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=False,
-        env=env,
-        bufsize=0,
-    )
-    assert process.stderr is not None
-    assert process.stdout is not None
-
-    stderr_chunks: list[str] = []
-    stdout_chunks: list[str] = []
-    sub_percent = 0.0
-    lock = threading.Lock()
-
-    def _consume_stream(stream: Any, collected: list[str]) -> None:
-        nonlocal sub_percent
-        parse_buffer = ""
-        while True:
-            raw = stream.read(_STREAM_CHUNK_SIZE)
-            if not raw:
-                break
-            text = raw.decode("utf-8", errors="replace")
-            message: str | None = None
-            with lock:
-                collected.append(text)
-                parse_buffer = (parse_buffer + text)[-_PARSE_WINDOW:]
-                sub_percent = parse_gdal_progress_chunk(parse_buffer, sub_percent)
-                message = text.strip() or None
-                zoom = parse_zoom_level(text)
-                if zoom is not None and message is None:
-                    message = f"Zoom {zoom}"
-                percent_snapshot = sub_percent
-            if on_subprogress is not None:
-                on_subprogress(percent_snapshot, message)
-
-    stderr_thread = threading.Thread(
-        target=_consume_stream,
-        args=(process.stderr, stderr_chunks),
-        daemon=True,
-    )
-    stdout_thread = threading.Thread(
-        target=_consume_stream,
-        args=(process.stdout, stdout_chunks),
-        daemon=True,
-    )
-    stderr_thread.start()
-    stdout_thread.start()
-
-    return_code = process.wait()
-    stderr_thread.join(timeout=5)
-    stdout_thread.join(timeout=5)
-
-    if on_subprogress is not None and return_code == 0:
-        on_subprogress(100.0, None)
-
-    if return_code != 0:
-        stderr = "".join(stderr_chunks)
-        stdout = "".join(stdout_chunks)
-        raise subprocess.CalledProcessError(
-            return_code,
-            cmd,
-            output=stdout,
-            stderr=stderr,
-        )
 
 
 def progress_to_store_fields(progress: JobProgress) -> dict[str, Any]:

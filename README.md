@@ -1,6 +1,6 @@
 # Ocean Imagery Handler
 
-正射影像 GeoTIFF 预处理与 Cesium 影像瓦片切片服务。基于 **FastAPI + Celery + Redis + GDAL `gdal raster tile`**，通过 **Nginx** 发布影像瓦片供 Cesium 加载。
+正射影像 GeoTIFF 预处理与 Cesium 影像瓦片切片服务。基于 **FastAPI + Celery + Redis + GDAL 3.12 Python API**，通过 **Nginx** 发布影像瓦片供 Cesium 加载。
 
 与姊妹项目 [ocean-terrain-handler](D:\workspace\ocean-terrain-handler) 架构对齐：地形服务负责 DEM → `CesiumTerrainProvider`，本服务负责正射影像 → `UrlTemplateImageryProvider`。
 
@@ -8,8 +8,8 @@
 
 ```
 客户端 → FastAPI → Redis 队列 → Celery Worker
-                                    ├─ GDAL 预处理 (gdal raster reproject / overview add)
-                                    ├─ gdal raster tile → PNG/JPEG 瓦片
+                                    ├─ GDAL Python API 预处理 (reproject / overview add)
+                                    ├─ GDAL Python API raster tile → PNG/JPEG 瓦片
                                     └─ 注册 tileset → nginx 发布
 
 Cesium 客户端 → imagery-server :8102/imagery/{name}/{z}/{x}/{y}.png
@@ -19,17 +19,17 @@ Cesium 客户端 → imagery-server :8102/imagery/{name}/{z}/{x}/{y}.png
 | 组件 | 职责 |
 |------|------|
 | API | 接收任务、文件上传、查询状态、发布管理 |
-| Worker | GDAL 预处理 + `gdal raster tile` 切片 + 注册发布 |
+| Worker | 进程内 GDAL 预处理 + raster tile 切片 + 注册发布 |
 | Redis | 任务队列与状态存储 |
 | imagery-server | Nginx 静态瓦片 HTTP 服务 |
 | 工作目录 | 输入影像、中间产物、瓦片输出、发布注册 |
 
 ## 处理流程
 
-1. **校验** — `gdal raster info` 检查输入栅格
-2. **投影** — `gdal raster reproject` 转为 EPSG:3857（Web Mercator，Cesium 推荐）
-3. **概览图** — `gdal raster overview add` 加速大文件切片
-4. **切片** — `gdal raster tile` 生成 `{z}/{x}/{y}.png`
+1. **校验** — `osgeo.gdal.Run(["raster", "info"])` 检查输入栅格
+2. **投影** — GDAL `raster reproject` Python 算法转为 EPSG:3857（Web Mercator，Cesium 推荐）
+3. **概览图** — GDAL `raster overview add` Python 算法加速大文件切片
+4. **切片** — GDAL `raster tile` Python 算法生成 `{z}/{x}/{y}.png`
 5. **元数据** — 生成标准 `tile.json`（TileJSON 3.0：bounds、zoom、tiles URL）
 6. **发布** — 注册到 `data/tilesets/imagery/{name}`，由 Nginx 对外服务
 
@@ -181,7 +181,7 @@ viewer.imageryLayers.addImageryProvider(imageryProvider);
 | `compress` | string | `DEFLATE` | 压缩方式：DEFLATE / LZW / JPEG（JPEG 不支持透明） |
 | `jpeg_quality` | int | `85` | JPEG 质量（仅 compress=JPEG） |
 | `add_alpha` | bool | `true` | 添加 Alpha，使影像外区域透明 |
-| `white_as_transparent` | bool | `true` | 将纯白 RGB(255,255,255) 填充视为透明 |
+| `white_as_transparent` | bool | `false` | 将纯白 RGB(255,255,255) 填充视为透明 |
 | `near_white` | int | `0` | 预留容差（当前未使用，仅精确白色） |
 
 ### 切片 `tiling_options`
@@ -196,6 +196,8 @@ viewer.imageryLayers.addImageryProvider(imageryProvider);
 | `resampling_method` | string | `bilinear` | `gdal raster tile` 重采样（`antialias` 映射为 `lanczos`） |
 | `thread_count` | int | `TILING_THREAD_COUNT` | 并行任务数（`-j`）；请求省略时用环境变量 |
 | `resume` | bool | `TILING_RESUME` | 断点续切；请求省略时用环境变量 |
+| `verbose` | bool | `false` | 启用详细处理信息 |
+| `kml` | bool | `false` | 生成 Google Earth SuperOverlay 元数据 |
 | `tile_scheme` | string | `xyz` | `xyz` 或 `tms` |
 
 ### 发布 `publish`
@@ -226,7 +228,63 @@ uvicorn app.main:app --reload --port 8100
 celery -A app.worker.celery_app worker --loglevel=info
 ```
 
-本地 Worker 需安装 **GDAL ≥ 3.11**（含统一 CLI `gdal raster tile`）。推荐 3.12+。
+本地 Worker 需安装匹配本机 `libgdal` 的 **GDAL Python bindings ≥ 3.12**。
+
+可在容器中运行完整的预处理与切片冒烟验证：
+
+```powershell
+docker compose build worker
+docker compose run --rm --no-deps worker python3 scripts/verify_gdal_python_pipeline.py
+```
+
+### 同步命令行处理真实影像
+
+CLI 使用与 `POST /api/v1/imagery/jobs` 相同的请求字段、默认值、枚举和校验规则，
+输出目录同样为 `WORKSPACE_DIR/jobs/{job_id}`：
+
+```powershell
+docker compose run --rm --no-deps worker python3 scripts/process_imagery.py `
+  --input-path /data/workspace/ortho.tif `
+  --target-crs EPSG:3857 `
+  --build-overviews `
+  --compress DEFLATE `
+  --add-alpha `
+  --profile mercator `
+  --tile-format PNG `
+  --tile-size 256 `
+  --start-zoom 18 `
+  --end-zoom 0 `
+  --resampling-method bilinear `
+  --thread-count 4 `
+  --resume `
+  --tile-scheme xyz `
+  --auto-publish `
+  --tileset-name ortho
+```
+
+布尔参数支持 `--参数` 和 `--no-参数`，例如 `--no-build-overviews`。
+参数同时接受连字符和 API 下划线形式，例如 `--tile-format` 与
+`--tile_format` 等价。也可以直接复用 API JSON 文件：
+
+```powershell
+docker compose run --rm --no-deps worker python3 scripts/process_imagery.py `
+  --request-json /data/workspace/request.json
+```
+
+命令执行期间，进度 JSON 写入 stderr，最终结果 JSON 写入 stdout；使用
+`--quiet` 可关闭进度输出。运行 `python3 scripts/process_imagery.py --help`
+可查看全部参数。
+
+若本机已安装匹配 `libgdal` 的 GDAL Python bindings 3.12，也可以不经过
+Docker 直接运行；Windows 下需先把工作目录配置为本机路径：
+
+```powershell
+$env:WORKSPACE_DIR = "D:\workspace\ocean-imagery-handler\data"
+.venv\Scripts\python.exe scripts\process_imagery.py `
+  --input-path "D:\imagery\ortho.tif" `
+  --start-zoom 18 `
+  --end-zoom 0
+```
 
 ## 项目结构
 
@@ -238,8 +296,9 @@ ocean-imagery-handler/
 │   ├── schemas.py
 │   ├── api/routes.py
 │   ├── services/
+│   │   ├── gdal_runtime.py    # GDAL Python 算法运行与进度适配
 │   │   ├── preprocessor.py    # GDAL 预处理
-│   │   ├── tiler_runner.py    # gdal raster tile
+│   │   ├── tiler_runner.py    # GDAL Python raster tile
 │   │   ├── tile_json.py       # tile.json (TileJSON 3.0)
 │   │   ├── tile_publisher.py  # 瓦片发布注册
 │   │   └── job_store.py
@@ -248,7 +307,10 @@ ocean-imagery-handler/
 │       └── tasks.py
 ├── docker/
 │   └── nginx.conf
-├── scripts/preview/             # Cesium 预览页 (index.html, app.js, styles.css)
+├── scripts/
+│   ├── process_imagery.py
+│   ├── verify_gdal_python_pipeline.py
+│   └── preview/                 # Cesium 预览页 (index.html, app.js, styles.css)
 ├── tests/
 ├── docker-compose.yml
 └── requirements.txt
